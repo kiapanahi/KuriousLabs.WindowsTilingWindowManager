@@ -3,20 +3,21 @@ using Bastion.Core;
 namespace Bastion.Layout;
 
 /// <summary>
-/// Minimal binary-spiral ("dwindle") layout: the first window takes half the remaining area,
-/// alternating horizontal/vertical split orientation down an ordered window list.
+/// Zero-config binary-spiral ("dwindle") layout: each new window splits off from the
+/// previously-added window's own tile, alternating horizontal/vertical orientation.
 /// </summary>
 /// <remarks>
-/// TODO(DESIGN.md §3.5, §6, §12 v0.1): this operates over a flat ordered window list, not the
-/// persistent split-tree (insert/remove-stable subtree identity) design DESIGN.md ultimately
-/// commits to — it satisfies the no-overlap, full-coverage, and determinism invariants
-/// (docs/engineering/testing.md §3) by construction, but does not yet satisfy the
-/// subtree-locality invariant for an arbitrary insert position (only append-at-tail is
-/// currently stable). Replace with a real <c>SplitTree</c>-backed engine before v0.1 ships.
+/// Backed by <see cref="SplitTree"/> (DESIGN.md §3.5, §6, §12 v0.1) rather than a flat window
+/// list, so a single insert/remove perturbs only the affected subtree
+/// (docs/engineering/testing.md §3's <c>InsertPerturbsOnlyAffectedSubtree</c> property) for an
+/// arbitrary insert position — the flat-list predecessor only supported stable append-at-tail.
 ///
-/// Deliberately iterative, not recursive, per the non-negotiable "guard recursion depth
-/// everywhere it can occur (layout tree operations)" rule (CLAUDE.md §5) — an arbitrarily large
-/// window count never grows the call stack here.
+/// <see cref="ILayoutEngine.Solve"/>'s signature takes a flat, ordered list with no tree handle
+/// persisted across calls, so this engine rebuilds the whole tree via <c>windows.Count - 1</c>
+/// sequential <see cref="SplitTree.Insert"/> calls on every invocation — O(n²) reconstruction,
+/// none of <see cref="SplitTree"/>'s incremental-reuse benefit realized at this call site. That's
+/// expected here: the point of this type is establishing correct persistent primitives for a
+/// future stateful consumer (e.g. the Reconciler, DESIGN.md §3.4), not speeding up this call site.
 /// </remarks>
 public sealed class DwindleLayoutEngine : ILayoutEngine
 {
@@ -33,35 +34,33 @@ public sealed class DwindleLayoutEngine : ILayoutEngine
             return [];
         }
 
-        var placements = new List<WindowPlacement>(windows.Count);
-        Rect area = workArea.Deflate(gaps.Outer);
-        var halfInnerGap = gaps.Inner / 2.0;
-        var horizontal = true;
-
-        for (var i = 0; i < windows.Count - 1; i++)
+        if (windows.Count > SplitTree.MaxDepth + 1)
         {
-            Rect first;
-            Rect rest;
+            return StackAllWindows(windows, workArea, gaps);
+        }
 
-            if (horizontal)
-            {
-                var mid = area.Left + (area.Width / 2.0);
-                first = area with { Right = mid - halfInnerGap };
-                rest = area with { Left = mid + halfInnerGap };
-            }
-            else
-            {
-                var mid = area.Top + (area.Height / 2.0);
-                first = area with { Bottom = mid - halfInnerGap };
-                rest = area with { Top = mid + halfInnerGap };
-            }
+        SplitTree tree = SplitTree.Empty.InsertFirst(windows[0]);
+        bool horizontal = true;
 
-            placements.Add(new WindowPlacement(windows[i], first));
-            area = rest;
+        for (int i = 1; i < windows.Count; i++)
+        {
+            tree = tree.Insert(windows[i - 1], windows[i], horizontal ? SplitOrientation.Horizontal : SplitOrientation.Vertical);
             horizontal = !horizontal;
         }
 
-        placements.Add(new WindowPlacement(windows[^1], area));
+        return SplitTreeLayout.Solve(tree, workArea, constraints, gaps);
+    }
+
+    private static List<WindowPlacement> StackAllWindows(IReadOnlyList<WindowId> windows, Rect workArea, LayoutGaps gaps)
+    {
+        Rect stackedBounds = workArea.Deflate(gaps.Outer);
+        List<WindowPlacement> placements = new(windows.Count);
+
+        for (int i = 0; i < windows.Count; i++)
+        {
+            placements.Add(new WindowPlacement(windows[i], stackedBounds));
+        }
+
         return placements;
     }
 }

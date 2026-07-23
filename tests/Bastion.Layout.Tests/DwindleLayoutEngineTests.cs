@@ -71,6 +71,22 @@ public sealed class DwindleLayoutEngineTests
         Assert.Equal(3, placements.Select(p => p.WindowId).Distinct().Count());
     }
 
+    [Fact]
+    public void SolveDoesNotThrowWhenWindowCountExceedsSplitTreeDepthCap()
+    {
+        var windows = Enumerable.Range(0, SplitTree.MaxDepth + 2)
+            .Select(i => WindowId.FromOpaqueValue((ulong)i))
+            .ToList();
+
+        Rect workArea = new(0, 0, 1920, 1080);
+        LayoutGaps gaps = new(Outer: 12, Inner: 6);
+
+        IReadOnlyList<WindowPlacement> placements = s_engine.Solve(windows, workArea, new LayoutConstraints(0, 0), gaps);
+
+        Assert.Equal(windows.Count, placements.Count);
+        Assert.Equal(windows, placements.Select(p => p.WindowId).ToList());
+    }
+
     private static IReadOnlyList<WindowPlacement> Solve(int windowCount, Rect workArea, LayoutGaps gaps)
     {
         var windows = Enumerable.Range(0, windowCount)
