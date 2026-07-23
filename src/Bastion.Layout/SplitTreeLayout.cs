@@ -82,6 +82,9 @@ public static class SplitTreeLayout
                 SolveCore(split.First, firstArea, constraints, gaps, placements, depth + 1);
                 SolveCore(split.Second, secondArea, constraints, gaps, placements, depth + 1);
                 break;
+
+            default:
+                throw new System.Diagnostics.UnreachableException();
         }
     }
 
