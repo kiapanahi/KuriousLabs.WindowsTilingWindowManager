@@ -72,6 +72,21 @@ internal static class WindowProbe
     public static HWND GetRootAncestor(HWND window) =>
         PInvoke.GetAncestor(window, GET_ANCESTOR_FLAGS.GA_ROOT);
 
+    /// <summary>
+    /// Wraps <c>GetClassName</c>, returning <see cref="string.Empty"/> on failure (e.g. a window
+    /// destroyed between whatever produced <paramref name="window"/> and this call — a routine
+    /// race, not exceptional) rather than throwing. Window class names are documented (the
+    /// <c>WNDCLASSEX</c> family's own <c>lpszClassName</c> remarks) to be at most 256 characters
+    /// including the terminator, so the fixed-size buffer below is never truncated.
+    /// </summary>
+    public static string GetClassName(HWND window)
+    {
+        const int MaxClassNameLength = 256;
+        Span<char> buffer = stackalloc char[MaxClassNameLength];
+        int length = PInvoke.GetClassName(window, buffer);
+        return length <= 0 ? string.Empty : new string(buffer[..length]);
+    }
+
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
     [SuppressMessage(
         "Design",
