@@ -77,8 +77,22 @@ Rules, in the order you'll trip over them:
   substitute for it.
 - **`useSafeHandles=true` stays at its default** for genuinely closeable
   kernel handles requested via `NativeMethods.txt` (file, process, thread,
-  registry, event handles, etc.). It has no bearing on HWND/HHOOK/HWINEVENTHOOK
-  — see §2.
+  registry, event handles, etc.).
+  **Correction (verified against the actual generated output while implementing
+  issue #1):** this setting is *not* inert for every HWND-family API the way
+  the previous wording here claimed. For at least `SetWinEventHook`, CsWin32
+  generates a *second*, `SafeHandle`-wrapping overload
+  (`UnhookWinEventSafeHandle`-returning) alongside the original raw
+  `HWINEVENTHOOK`-returning one — both exist simultaneously; `useSafeHandles`
+  adds the wrapped overload, it does not replace the raw one. §2's rule is
+  therefore about *which overload to call*, not about `useSafeHandles` having
+  zero effect: always call the raw-handle-returning overload for
+  `HWND`/`HHOOK`/`HWINEVENTHOOK`-family APIs, never the `SafeHandle`-wrapping
+  one CsWin32 also emits, for the reasons in §2 (no correct universal
+  `ReleaseHandle` for a resource Bastion doesn't own the lifetime of). Verify
+  this per-API on the actual generated partial before assuming either
+  direction — do not assume every HWND-family API gets a wrapped overload, and
+  do not assume none do.
 - **Record the final resolved settings here** once `Bastion.Win32.csproj` and
   `NativeMethods.json` exist in the repo, including any deviation and why.
 
