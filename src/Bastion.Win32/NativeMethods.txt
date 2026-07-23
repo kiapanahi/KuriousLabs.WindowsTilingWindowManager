@@ -31,3 +31,7 @@ EVENT_OBJECT_LOCATIONCHANGE
 EVENT_OBJECT_NAMECHANGE
 EVENT_OBJECT_CLOAKED
 EVENT_OBJECT_UNCLOAKED
+
+// DESIGN.md §3.2/§4 cloak-burst-to-DesktopSwitchSuspected heuristic (Coalescer, issue #2).
+DwmGetWindowAttribute
+DWMWINDOWATTRIBUTE

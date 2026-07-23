@@ -43,10 +43,11 @@
     <PackageReference Include="Microsoft.Windows.CsWin32" PrivateAssets="all" />
 
     <!--
-      WinEventPumpService implements IHostedService (DESIGN.md §3.1, docs/engineering/daemon-
-      architecture.md §2) so it can be registered from Bastion.Daemon's composition root, but this
-      project is not itself a host/composition root — reference only the abstractions package
-      that declares the interface, not the full Microsoft.Extensions.Hosting meta-package.
+      WinEventPumpService (issue #1) and Coalescer (issue #2) implement
+      IHostedService/BackgroundService so they can be registered from Bastion.Daemon's
+      composition root, but this project is not itself a host/composition root — reference only
+      the abstractions package that declares the interface/base class, not the full
+      Microsoft.Extensions.Hosting meta-package.
     -->
     <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" />
   </ItemGroup>
