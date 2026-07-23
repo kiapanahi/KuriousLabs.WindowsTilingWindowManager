@@ -25,6 +25,11 @@ All work is tracked as [GitHub issues](../../issues), organized into
 (v0.1 through v1.0). There is no separate roadmap document or project
 board — the issue tracker *is* the backlog.
 
+Not sure where to start? The pinned **Getting started** issue lists every
+currently-unblocked issue in the active milestone — everything else has an
+explicit `blocked by` relationship in its own sidebar pointing at what needs
+to land first.
+
 Every issue is required to be actionable by someone who has never seen any
 conversation about it — using only the issue text, whatever it links to,
 and the files in this repo. If an issue seems to assume context you don't
