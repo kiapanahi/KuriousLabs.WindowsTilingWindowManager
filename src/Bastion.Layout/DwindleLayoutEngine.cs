@@ -34,6 +34,11 @@ public sealed class DwindleLayoutEngine : ILayoutEngine
             return [];
         }
 
+        if (windows.Count > SplitTree.MaxDepth + 1)
+        {
+            return StackAllWindows(windows, workArea, gaps);
+        }
+
         SplitTree tree = SplitTree.Empty.InsertFirst(windows[0]);
         bool horizontal = true;
 
@@ -44,5 +49,18 @@ public sealed class DwindleLayoutEngine : ILayoutEngine
         }
 
         return SplitTreeLayout.Solve(tree, workArea, constraints, gaps);
+    }
+
+    private static List<WindowPlacement> StackAllWindows(IReadOnlyList<WindowId> windows, Rect workArea, LayoutGaps gaps)
+    {
+        Rect stackedBounds = workArea.Deflate(gaps.Outer);
+        List<WindowPlacement> placements = new(windows.Count);
+
+        for (int i = 0; i < windows.Count; i++)
+        {
+            placements.Add(new WindowPlacement(windows[i], stackedBounds));
+        }
+
+        return placements;
     }
 }
