@@ -1,5 +1,6 @@
 using Bastion.Core;
 using FsCheck.Xunit;
+using Xunit;
 
 namespace Bastion.Layout.Tests;
 
@@ -97,7 +98,11 @@ public sealed class SplitTreeTests
     /// <see cref="SplitTreeGenerators"/>'s remarks on the worst-case chain depth this bounds
     /// against) rather than an aggregate, always-correct one — see
     /// <see cref="SplitTreeLayout.Solve"/>'s own remarks for why the stronger guarantee was
-    /// rejected (it breaks subtree-locality).
+    /// rejected (it breaks subtree-locality). Deliberately zero-gap: when <c>gaps.Inner == 0</c>,
+    /// <c>ClampRatio</c>'s minimum-ratio formula collapses to the same value whether or not it
+    /// accounts for the half-gap term, so this property alone cannot distinguish a correct clamp
+    /// from PR #37's under-clamping bug — <see cref="ClampedRatioRespectsMinimumUnderNonzeroGap"/>
+    /// below covers the nonzero-gap case this one structurally cannot.
     /// </summary>
     [Property]
     public bool MinSizeRespected(SplitTree tree, int rawWidth, int rawHeight, int rawMinWidth, int rawMinHeight)
@@ -108,6 +113,107 @@ public sealed class SplitTreeTests
         IReadOnlyList<WindowPlacement> placements = SplitTreeLayout.Solve(tree, workArea, constraints, new LayoutGaps(0, 0));
 
         return placements.All(p => p.Bounds.Width >= constraints.MinWidth - Epsilon && p.Bounds.Height >= constraints.MinHeight - Epsilon);
+    }
+
+    /// <summary>
+    /// Regression coverage for the PR #37 review finding in <c>ClampRatio</c>: for a single split
+    /// whose axis has room for both children at the configured minimum (<c>2 * min + gap &lt;=
+    /// axisSize</c>), the solved children must never fall below that minimum — even when the
+    /// requested ratio sits far outside the feasible range and the inner gap is nonzero.
+    /// <paramref name="rawExtra"/> guarantees feasibility by construction (no FsCheck
+    /// precondition/discarding needed); <paramref name="rawFraction"/> forces the ratio strictly
+    /// below the correct minimum ratio so <c>ClampRatio</c> must actively raise it. Deliberately a
+    /// single split with no ancestor chain, so this isolates <c>ClampRatio</c>/
+    /// <see cref="SplitTreeLayout.SplitRect"/>'s own local guarantee from the flat clamp's
+    /// documented multi-level limitation (<see cref="SplitTreeLayout.Solve"/>'s remarks) — unlike
+    /// <see cref="MinSizeRespected"/>, this is expected to hold exactly, not just within a
+    /// generous margin.
+    /// </summary>
+    [Property]
+    public bool ClampedRatioRespectsMinimumUnderNonzeroGap(int rawExtra, int rawMin, int rawGap, int rawFraction, bool horizontal)
+    {
+        double min = (Math.Abs((long)rawMin) % 500) + 1;
+        double gap = Math.Abs((long)rawGap) % 500;
+        double extra = (Math.Abs((long)rawExtra) % 2000) + 1;
+        double axisSize = (2 * min) + gap + extra; // strictly feasible: 2*min + gap < axisSize
+        double halfGap = gap / 2.0;
+        double correctMinRatio = (min + halfGap) / axisSize;
+
+        // Strictly below correctMinRatio (fraction in (0.001, 0.999]), so the clamp must engage
+        // regardless of which formula — buggy or fixed — computes its threshold.
+        double fraction = ((Math.Abs((long)rawFraction) % 999) + 1) * 0.001;
+        double ratio = correctMinRatio * fraction;
+
+        var first = WindowId.FromOpaqueValue(0);
+        var second = WindowId.FromOpaqueValue(1);
+        SplitOrientation orientation = horizontal ? SplitOrientation.Horizontal : SplitOrientation.Vertical;
+        SplitTree tree = SplitTree.Empty.InsertFirst(first).Insert(first, second, orientation, ratio);
+
+        Rect workArea = new(0, 0, axisSize, axisSize);
+        LayoutGaps gaps = new(Outer: 0, Inner: gap);
+        LayoutConstraints constraints = new(min, min);
+
+        IReadOnlyList<WindowPlacement> placements = SplitTreeLayout.Solve(tree, workArea, constraints, gaps);
+        Rect firstBounds = placements.Single(p => p.WindowId == first).Bounds;
+        Rect secondBounds = placements.Single(p => p.WindowId == second).Bounds;
+
+        double firstSize = horizontal ? firstBounds.Width : firstBounds.Height;
+        double secondSize = horizontal ? secondBounds.Width : secondBounds.Height;
+
+        return firstSize >= min - Epsilon && secondSize >= min - Epsilon;
+    }
+
+    /// <summary>
+    /// The exact counterexample from PR #37's review (Codex): a 100px axis, a 10px inner gap, a
+    /// 40px minimum, and a requested ratio of 0.1. <c>ClampRatio</c> used to clamp this to
+    /// <c>40 / 90 ≈ 0.444</c> (ignoring the half-gap <see cref="SplitTreeLayout.SplitRect"/>
+    /// subtracts from each child), producing a first child of only
+    /// <c>100 * 0.444... - 5 ≈ 39.44px</c> — below the configured minimum despite both children
+    /// fitting at 40px each (<c>2 * 40 + 10 == 90 &lt;= 100</c>). The corrected clamp
+    /// (<c>(40 + 5) / 100 == 0.45</c>) gives the first child exactly 40px.
+    /// </summary>
+    [Fact]
+    public void ClampRatioAccountsForHalfGapAtMinSizeBoundary()
+    {
+        var first = WindowId.FromOpaqueValue(0);
+        var second = WindowId.FromOpaqueValue(1);
+        SplitTree tree = SplitTree.Empty.InsertFirst(first).Insert(first, second, SplitOrientation.Horizontal, ratio: 0.1);
+
+        Rect workArea = new(0, 0, 100, 100);
+        LayoutGaps gaps = new(Outer: 0, Inner: 10);
+        LayoutConstraints constraints = new(MinWidth: 40, MinHeight: 0);
+
+        IReadOnlyList<WindowPlacement> placements = SplitTreeLayout.Solve(tree, workArea, constraints, gaps);
+        Rect firstBounds = placements.Single(p => p.WindowId == first).Bounds;
+        Rect secondBounds = placements.Single(p => p.WindowId == second).Bounds;
+
+        Assert.True(firstBounds.Width >= constraints.MinWidth - Epsilon,
+            $"First child width {firstBounds.Width} fell below the configured minimum of {constraints.MinWidth}.");
+        Assert.True(AlmostEqual(firstBounds.Width, 40.0), $"Expected the first child's width to be clamped to exactly 40, got {firstBounds.Width}.");
+        Assert.True(AlmostEqual(secondBounds.Width, 50.0), $"Expected the second child's width to be exactly 50, got {secondBounds.Width}.");
+    }
+
+    /// <summary>
+    /// <see cref="SplitNode.Ratio"/> documents an open-interval <c>(0, 1)</c> contract; PR #37's
+    /// review flagged that <see cref="SplitTree.Insert"/> never enforced it, letting a NaN,
+    /// infinite, zero, negative, or &gt;=1 ratio (e.g. from a corrupted persisted manual-layout
+    /// ratio) flow straight into <see cref="SplitNode"/> and produce empty/inverted/NaN rects.
+    /// </summary>
+    [Theory]
+    [InlineData(0.0)]
+    [InlineData(1.0)]
+    [InlineData(-0.5)]
+    [InlineData(1.5)]
+    [InlineData(double.NaN)]
+    [InlineData(double.PositiveInfinity)]
+    [InlineData(double.NegativeInfinity)]
+    public void InsertRejectsRatioOutsideOpenUnitInterval(double invalidRatio)
+    {
+        var anchor = WindowId.FromOpaqueValue(0);
+        var newWindow = WindowId.FromOpaqueValue(1);
+        SplitTree tree = SplitTree.Empty.InsertFirst(anchor);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => tree.Insert(anchor, newWindow, SplitOrientation.Horizontal, invalidRatio));
     }
 
     /// <summary>

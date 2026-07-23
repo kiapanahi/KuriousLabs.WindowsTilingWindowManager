@@ -64,12 +64,24 @@ public sealed class SplitTree
     /// <paramref name="ratio"/> of the split (as <see cref="SplitNode.First"/>) and placing
     /// <paramref name="newWindow"/> in a new sibling leaf (<see cref="SplitNode.Second"/>).
     /// </summary>
+    /// <param name="ratio">
+    /// <see cref="SplitNode.First"/>'s share of the split axis. Must be finite and strictly
+    /// between 0 and 1 — see <see cref="SplitNode.Ratio"/>'s documented open-interval contract.
+    /// </param>
     /// <exception cref="ArgumentException">
     /// <paramref name="anchor"/> is not present in this tree, or <paramref name="newWindow"/> already is.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="ratio"/> is not finite, or is not strictly between 0 and 1.
     /// </exception>
     /// <exception cref="InvalidOperationException">The tree exceeds <see cref="MaxDepth"/>.</exception>
     public SplitTree Insert(WindowId anchor, WindowId newWindow, SplitOrientation orientation, double ratio = 0.5)
     {
+        if (!double.IsFinite(ratio) || ratio <= 0.0 || ratio >= 1.0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(ratio), ratio, "Ratio must be finite and strictly between 0 and 1 (exclusive), per SplitNode.Ratio's documented contract.");
+        }
+
         if (Root is null)
         {
             throw new ArgumentException($"Anchor window {anchor} not found in an empty tree.", nameof(anchor));
@@ -108,7 +120,7 @@ public sealed class SplitTree
 
     private static bool Contains(SplitTreeNode node, WindowId windowId, int depth)
     {
-        if (depth > MaxDepth)
+        if (depth >= MaxDepth)
         {
             throw new InvalidOperationException($"SplitTree exceeded the maximum depth of {MaxDepth}.");
         }
@@ -123,7 +135,7 @@ public sealed class SplitTree
 
     private static bool TryInsert(SplitTreeNode node, WindowId anchor, WindowId newWindow, SplitOrientation orientation, double ratio, int depth, out SplitTreeNode result)
     {
-        if (depth > MaxDepth)
+        if (depth >= MaxDepth)
         {
             throw new InvalidOperationException($"SplitTree exceeded the maximum depth of {MaxDepth}.");
         }
@@ -161,7 +173,7 @@ public sealed class SplitTree
 
     private static bool TryRemove(SplitTreeNode node, WindowId target, int depth, out SplitTreeNode? result)
     {
-        if (depth > MaxDepth)
+        if (depth >= MaxDepth)
         {
             throw new InvalidOperationException($"SplitTree exceeded the maximum depth of {MaxDepth}.");
         }
@@ -200,7 +212,7 @@ public sealed class SplitTree
 
     private static void CollectWindows(SplitTreeNode node, List<WindowId> result, int depth)
     {
-        if (depth > MaxDepth)
+        if (depth >= MaxDepth)
         {
             throw new InvalidOperationException($"SplitTree exceeded the maximum depth of {MaxDepth}.");
         }

@@ -34,7 +34,11 @@ public static class SplitTreeLayout
     {
         ArgumentNullException.ThrowIfNull(tree);
 
-        List<WindowPlacement> placements = new(tree.Windows.Count);
+        // No capacity hint from tree.Windows.Count: that property walks the whole tree and
+        // allocates a throwaway List<WindowId> just to size this one, doubling the traversal cost
+        // of this hot path for no real benefit — List<T>'s own doubling growth is far cheaper than
+        // a second full tree walk plus its allocation (PR #37 review).
+        List<WindowPlacement> placements = [];
         if (tree.Root is not null)
         {
             SolveCore(tree.Root, workArea.Deflate(gaps.Outer), constraints, gaps, placements, depth: 0);
@@ -45,7 +49,7 @@ public static class SplitTreeLayout
 
     private static void SolveCore(SplitTreeNode node, Rect area, LayoutConstraints constraints, LayoutGaps gaps, List<WindowPlacement> placements, int depth)
     {
-        if (depth > SplitTree.MaxDepth)
+        if (depth >= SplitTree.MaxDepth)
         {
             // Fail soft, not loud: collapse whatever remains into the current rect instead of
             // throwing. This runs on the Reconciler's hot path (DESIGN.md §3.4) — an unhandled
@@ -105,15 +109,17 @@ public static class SplitTreeLayout
     private static double ClampRatio(SplitNode split, Rect area, LayoutConstraints constraints, LayoutGaps gaps)
     {
         bool horizontal = split.Orientation == SplitOrientation.Horizontal;
-        double available = (horizontal ? area.Width : area.Height) - gaps.Inner;
+        double axisSize = horizontal ? area.Width : area.Height;
         double min = horizontal ? constraints.MinWidth : constraints.MinHeight;
 
-        if (available <= 0 || min <= 0)
+        if (axisSize <= 0 || min <= 0)
         {
             return split.Ratio;
         }
 
-        if (min * 2 > available)
+        // First + Second together can claim at most axisSize - gaps.Inner (see SplitRect below):
+        // that's the combined budget both children draw their half-gap-adjusted size from.
+        if (min * 2 > axisSize - gaps.Inner)
         {
             // Both sides can't have the minimum at once. DESIGN.md §6's ladder steps 2/3 (bounded
             // overlap, auto-float) own this case; here, split proportionally to each side's
@@ -121,7 +127,13 @@ public static class SplitTreeLayout
             return 0.5;
         }
 
-        double minRatio = min / available;
+        // SplitRect computes First = axisSize * ratio - halfGap and Second = axisSize * (1 -
+        // ratio) - halfGap, so First >= min requires ratio >= (min + halfGap) / axisSize — NOT
+        // min / (axisSize - gap). Dividing by the gap-deflated axis instead of the raw one omits
+        // the half-gap term SplitRect actually subtracts from each child, under-clamping the
+        // ratio and letting a child land below the configured minimum (PR #37 review).
+        double halfGap = gaps.Inner / 2.0;
+        double minRatio = (min + halfGap) / axisSize;
         return Math.Clamp(split.Ratio, minRatio, 1.0 - minRatio);
     }
 
