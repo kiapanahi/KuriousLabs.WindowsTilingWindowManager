@@ -162,6 +162,9 @@ public static class SplitTreeLayout
                     stack.Push(split.Second);
                     stack.Push(split.First);
                     break;
+
+                default:
+                    throw new System.Diagnostics.UnreachableException();
             }
         }
     }
