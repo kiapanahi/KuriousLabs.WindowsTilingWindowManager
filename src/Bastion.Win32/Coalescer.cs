@@ -34,11 +34,18 @@ namespace Bastion.Win32;
 /// wrongly folded into one intent. Separately, <em>when</em> a pending batch actually flushes is
 /// governed by a <see cref="TimeProvider"/>-backed one-shot <see cref="ITimer"/>
 /// (<see cref="TimeProvider.CreateTimer"/>) per (Hwnd, <see cref="IntentKind"/>) pair, reset on
-/// every merge — a live storm keeps pushing the flush out until it actually goes quiet, bounded to
-/// <see cref="_coalesceWindow"/> of quiet time. <see cref="WindowVanished"/> (from
-/// <c>EVENT_OBJECT_DESTROY</c>) and the <c>MOVESIZEEND</c>-driven <see cref="DragEnded"/>/
-/// <see cref="GeometryDrift"/> pair are the only three intents emitted immediately, never
-/// debounced — see their own remarks and <see cref="HandleDragEnd"/> for why.
+/// every merge — a live storm keeps pushing the flush out until it actually goes quiet. Most
+/// batches are bounded to <see cref="_coalesceWindow"/> of quiet time; a SHOW/genuinely-uncloaked
+/// <see cref="WindowAppeared"/> batch instead waits <see cref="_admissionGrace"/> (DESIGN.md §5:
+/// "Coalescer applies ~150 ms admission grace" so Electron/UWP windows finish self-sizing before
+/// the Registry/Reconciler ever see them) — a NAMECHANGE-triggered <see cref="WindowAppeared"/>
+/// batch stays on the shorter <see cref="_coalesceWindow"/> instead, since it is a re-evaluation of
+/// an already-admitted window, not a fresh admission. A batch's flush delay only ever grows
+/// (never shrinks) across a merge, so a SHOW followed shortly by a NAMECHANGE for the same window
+/// keeps the full admission grace rather than being cut short by the NAMECHANGE's shorter delay.
+/// <see cref="WindowVanished"/> (from <c>EVENT_OBJECT_DESTROY</c>) and the <c>MOVESIZEEND</c>-driven
+/// <see cref="DragEnded"/>/<see cref="GeometryDrift"/> pair are the only three intents emitted
+/// immediately, never debounced — see their own remarks and <see cref="HandleDragEnd"/> for why.
 /// </para>
 /// <para>
 /// <b>Thread safety.</b> Flush timers fire on thread-pool threads (documented:
@@ -52,6 +59,14 @@ namespace Bastion.Win32;
 /// thread-pool thread before the dispose), so it re-checks the batch is still the <em>current</em>
 /// entry for its (Hwnd, Kind) before emitting, rather than trusting that disposing a timer means
 /// its callback can never run again.
+/// </para>
+/// <para>
+/// <b>Overflow recovery.</b> The coalesced-intent channel's <c>itemDropped</c> callback both
+/// increments <see cref="DroppedIntentCount"/> (test-observable) and calls
+/// <see cref="IReconcileNowSignal.RequestReconcileNow"/> — the same recovery signal the WinEvent
+/// ingest channel's own overflow already uses (GitHub issue #1,
+/// docs/engineering/concurrency-performance.md §1), per DESIGN.md §3.4's distrust-escalation
+/// trigger list, which names "queue overflow" generally rather than only the ingest channel's.
 /// </para>
 /// </remarks>
 [SuppressMessage(
@@ -69,6 +84,15 @@ internal sealed class Coalescer : BackgroundService
     /// <c>coalesceWindow</c> parameter. This is only the shipped default.
     /// </summary>
     internal static readonly TimeSpan DefaultCoalesceWindow = TimeSpan.FromMilliseconds(75);
+
+    /// <summary>
+    /// DESIGN.md §5's "~150 ms admission grace" default — applied specifically to a fresh
+    /// SHOW/genuinely-uncloaked <see cref="WindowAppeared"/> so Electron/UWP windows finish
+    /// self-sizing before the Registry/Reconciler ever see them. Also "engineering practice, not a
+    /// documented constant" (§3.2), config-tunable via the constructor's <c>admissionGrace</c>
+    /// parameter.
+    /// </summary>
+    internal static readonly TimeSpan DefaultAdmissionGrace = TimeSpan.FromMilliseconds(150);
 
     // Bounded, matching the ingest channel's own established pattern
     // (docs/engineering/concurrency-performance.md §1) rather than an unbounded channel: capacity
@@ -90,8 +114,10 @@ internal sealed class Coalescer : BackgroundService
 
     private readonly ChannelReader<WinEvent> _ingestReader;
     private readonly ICloakStateReader _cloakStateReader;
+    private readonly IReconcileNowSignal _reconcileNowSignal;
     private readonly TimeProvider _timeProvider;
     private readonly TimeSpan _coalesceWindow;
+    private readonly TimeSpan _admissionGrace;
     private readonly Channel<CoalescedIntent> _intentChannel;
     private readonly ChannelWriter<CoalescedIntent> _intentWriter;
     private readonly TimerCallback _onFlushTimerFired;
@@ -102,22 +128,32 @@ internal sealed class Coalescer : BackgroundService
     public Coalescer(
         ChannelReader<WinEvent> ingestReader,
         ICloakStateReader cloakStateReader,
+        IReconcileNowSignal reconcileNowSignal,
         TimeProvider timeProvider,
-        TimeSpan coalesceWindow)
+        TimeSpan coalesceWindow,
+        TimeSpan admissionGrace)
     {
         ArgumentNullException.ThrowIfNull(ingestReader);
         ArgumentNullException.ThrowIfNull(cloakStateReader);
+        ArgumentNullException.ThrowIfNull(reconcileNowSignal);
         ArgumentNullException.ThrowIfNull(timeProvider);
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(coalesceWindow, TimeSpan.Zero);
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(admissionGrace, TimeSpan.Zero);
 
         _ingestReader = ingestReader;
         _cloakStateReader = cloakStateReader;
+        _reconcileNowSignal = reconcileNowSignal;
         _timeProvider = timeProvider;
         _coalesceWindow = coalesceWindow;
+        _admissionGrace = admissionGrace;
         _onFlushTimerFired = OnFlushTimerFired;
         _intentChannel = Channel.CreateBounded<CoalescedIntent>(
             s_intentChannelOptions,
-            itemDropped: _ => Interlocked.Increment(ref _droppedIntentCount));
+            itemDropped: _ =>
+            {
+                Interlocked.Increment(ref _droppedIntentCount);
+                _reconcileNowSignal.RequestReconcileNow();
+            });
         _intentWriter = _intentChannel.Writer;
     }
 
@@ -130,9 +166,9 @@ internal sealed class Coalescer : BackgroundService
 
     /// <summary>
     /// Test-observable count of intents shed because <see cref="IntentReader"/>'s consumer fell
-    /// behind — mirrors the ingest channel's <c>itemDropped</c> observability
-    /// (docs/engineering/concurrency-performance.md §1), scaled down to a counter here since no
-    /// <see cref="IReconcileNowSignal"/>-shaped production signal exists yet for this channel.
+    /// behind. A companion to (not a substitute for) the production recovery path: every drop this
+    /// counts also calls <see cref="IReconcileNowSignal.RequestReconcileNow"/>, mirroring the
+    /// ingest channel's own overflow contract (docs/engineering/concurrency-performance.md §1).
     /// </summary>
     internal long DroppedIntentCount => Interlocked.Read(ref _droppedIntentCount);
 
@@ -166,25 +202,15 @@ internal sealed class Coalescer : BackgroundService
                 break;
 
             case PInvoke.EVENT_OBJECT_SHOW:
-                ScheduleOrMerge(evt.Hwnd, IntentKind.WindowAppeared, evt.DwmsEventTimeMs);
+                HandleShow(evt.Hwnd, evt.DwmsEventTimeMs);
                 break;
 
             case PInvoke.EVENT_OBJECT_NAMECHANGE:
-                // Open design question, resolved here: DESIGN.md §3.2 says NAMECHANGE
-                // re-evaluation is "rate-limited" but does not name which of the six intents it
-                // maps to. §3.3 ("late titles drive rules... re-evaluated on NAMECHANGE") and §5
-                // ("A late EVENT_OBJECT_NAMECHANGE re-runs rules and may re-home the window") both
-                // frame a NAMECHANGE exactly like a fresh admission — the same rules pass a
-                // SHOW/UNCLOAKED triggers. WindowAppeared is therefore the natural mapping: a
-                // rate-limited "re-evaluate this window" signal, semantically the same intent as
-                // first appearance, not a 7th type contradicting the acceptance criteria's "six
-                // intent types." Routing it through the same per-(Hwnd, WindowAppeared) debounce
-                // as SHOW/UNCLOAKED gives it exactly the "rate-limited" behavior §3.2 asks for.
-                ScheduleOrMerge(evt.Hwnd, IntentKind.WindowAppeared, evt.DwmsEventTimeMs);
+                HandleNameChange(evt.Hwnd, evt.DwmsEventTimeMs);
                 break;
 
             case PInvoke.EVENT_SYSTEM_FOREGROUND:
-                ScheduleOrMerge(evt.Hwnd, IntentKind.ForegroundChanged, evt.DwmsEventTimeMs);
+                ScheduleOrMerge(evt.Hwnd, IntentKind.ForegroundChanged, evt.DwmsEventTimeMs, _coalesceWindow);
                 break;
 
             case PInvoke.EVENT_SYSTEM_MOVESIZESTART:
@@ -230,6 +256,32 @@ internal sealed class Coalescer : BackgroundService
         // Never debounced — see WindowVanished's own remarks for why.
         _ = _intentWriter.TryWrite(new WindowVanished(hwnd));
     }
+
+    /// <summary>
+    /// DESIGN.md §5: "Coalescer applies ~150 ms admission grace (lets Electron/UWP self-size...)"
+    /// on the SHOW path specifically — longer than, and independent of, the ~75 ms
+    /// storm-coalescing window <see cref="_coalesceWindow"/> governs everywhere else.
+    /// </summary>
+    private void HandleShow(nint hwnd, uint dwmsEventTimeMs) =>
+        ScheduleOrMerge(hwnd, IntentKind.WindowAppeared, dwmsEventTimeMs, _admissionGrace);
+
+    /// <summary>
+    /// Open design question, resolved here: DESIGN.md §3.2 says NAMECHANGE re-evaluation is
+    /// "rate-limited" but does not name which of the six intents it maps to. §3.3 ("late titles
+    /// drive rules... re-evaluated on NAMECHANGE") and §5 ("A late EVENT_OBJECT_NAMECHANGE re-runs
+    /// rules and may re-home the window") both frame a NAMECHANGE exactly like a fresh admission —
+    /// the same rules pass a SHOW/UNCLOAKED triggers. <see cref="WindowAppeared"/> is therefore the
+    /// natural mapping: a rate-limited "re-evaluate this window" signal, semantically the same
+    /// intent as first appearance, not a 7th type contradicting the acceptance criteria's "six
+    /// intent types." Routing it through the same per-(Hwnd, WindowAppeared) debounce as
+    /// SHOW/UNCLOAKED gives it exactly the "rate-limited" behavior §3.2 asks for — but on the
+    /// shorter <see cref="_coalesceWindow"/>, not <see cref="HandleShow"/>'s admission grace: a
+    /// NAMECHANGE is a re-evaluation of a window already past admission, not a fresh one that
+    /// might still be self-sizing, so it doesn't need the longer wait (if a SHOW's admission grace
+    /// is already pending for this window, <see cref="MergeOrCreateLocked"/> never shrinks it).
+    /// </summary>
+    private void HandleNameChange(nint hwnd, uint dwmsEventTimeMs) =>
+        ScheduleOrMerge(hwnd, IntentKind.WindowAppeared, dwmsEventTimeMs, _coalesceWindow);
 
     private void HandleDragStart(nint hwnd)
     {
@@ -282,7 +334,7 @@ internal sealed class Coalescer : BackgroundService
                 return;
             }
 
-            MergeOrCreateLocked(state, hwnd, IntentKind.GeometryDrift, dwmsEventTimeMs);
+            MergeOrCreateLocked(state, hwnd, IntentKind.GeometryDrift, dwmsEventTimeMs, _coalesceWindow);
         }
     }
 
@@ -293,7 +345,7 @@ internal sealed class Coalescer : BackgroundService
             // DESIGN.md §3.2/§4's observed-behavior heuristic — see DesktopSwitchSuspected's own
             // remarks for the full classification and citation; an already-accepted design
             // decision, not re-derived here.
-            ScheduleOrMerge(evt.Hwnd, IntentKind.DesktopSwitchSuspected, evt.DwmsEventTimeMs);
+            ScheduleOrMerge(evt.Hwnd, IntentKind.DesktopSwitchSuspected, evt.DwmsEventTimeMs, _coalesceWindow);
             return;
         }
 
@@ -301,8 +353,9 @@ internal sealed class Coalescer : BackgroundService
         {
             // DESIGN.md §3.3/§5: windows are admitted on SHOW/UNCLOAKED. A currently-not-cloaked
             // UNCLOAKED event is exactly that admission trigger — the same WindowAppeared signal
-            // SHOW produces (see WindowAppeared's own remarks).
-            ScheduleOrMerge(evt.Hwnd, IntentKind.WindowAppeared, evt.DwmsEventTimeMs);
+            // SHOW produces (see WindowAppeared's own remarks), including SHOW's ~150 ms admission
+            // grace rather than the shorter storm-coalescing window.
+            ScheduleOrMerge(evt.Hwnd, IntentKind.WindowAppeared, evt.DwmsEventTimeMs, _admissionGrace);
             return;
         }
 
@@ -313,12 +366,12 @@ internal sealed class Coalescer : BackgroundService
         // state this narrow race could leave stale.
     }
 
-    private void ScheduleOrMerge(nint hwnd, IntentKind kind, uint dwmsEventTimeMs)
+    private void ScheduleOrMerge(nint hwnd, IntentKind kind, uint dwmsEventTimeMs, TimeSpan delay)
     {
         lock (_gate)
         {
             HwndState state = GetOrCreateStateLocked(hwnd);
-            MergeOrCreateLocked(state, hwnd, kind, dwmsEventTimeMs);
+            MergeOrCreateLocked(state, hwnd, kind, dwmsEventTimeMs, delay);
         }
     }
 
@@ -334,8 +387,15 @@ internal sealed class Coalescer : BackgroundService
         return state;
     }
 
-    /// <summary>Caller must hold <see cref="_gate"/>.</summary>
-    private void MergeOrCreateLocked(HwndState state, nint hwnd, IntentKind kind, uint dwmsEventTimeMs)
+    /// <summary>
+    /// Caller must hold <see cref="_gate"/>. <paramref name="delay"/> is the flush wait this
+    /// specific raw event asks for (<see cref="_coalesceWindow"/> for most kinds,
+    /// <see cref="_admissionGrace"/> for a fresh SHOW/genuinely-uncloaked <see cref="WindowAppeared"/>)
+    /// — a merge into an existing batch only ever grows the batch's effective delay, never shrinks
+    /// it, so a longer wait already in flight (e.g. an admission grace) survives a later,
+    /// shorter-delay merge (e.g. a NAMECHANGE) into the same batch.
+    /// </summary>
+    private void MergeOrCreateLocked(HwndState state, nint hwnd, IntentKind kind, uint dwmsEventTimeMs, TimeSpan delay)
     {
         state.PendingBatches ??= [];
 
@@ -346,7 +406,12 @@ internal sealed class Coalescer : BackgroundService
                 // Same burst: fold in and push the flush deadline out again from now — a live
                 // storm keeps extending the debounce until it actually goes quiet.
                 existing.LastDwmsEventTimeMs = dwmsEventTimeMs;
-                existing.Timer?.Change(_coalesceWindow, Timeout.InfiniteTimeSpan);
+                if (delay > existing.Delay)
+                {
+                    existing.Delay = delay;
+                }
+
+                existing.Timer?.Change(existing.Delay, Timeout.InfiniteTimeSpan);
                 return;
             }
 
@@ -366,8 +431,8 @@ internal sealed class Coalescer : BackgroundService
         // The timer's `state` argument must be `batch` itself (so OnFlushTimerFired can recover
         // it), which means the timer can only be created once `batch` already exists — construct
         // first, then arm the timer as a separate step, rather than via an object initializer.
-        var batch = new PendingBatch(hwnd, kind, dwmsEventTimeMs);
-        batch.Timer = _timeProvider.CreateTimer(_onFlushTimerFired, batch, _coalesceWindow, Timeout.InfiniteTimeSpan);
+        var batch = new PendingBatch(hwnd, kind, dwmsEventTimeMs, delay);
+        batch.Timer = _timeProvider.CreateTimer(_onFlushTimerFired, batch, delay, Timeout.InfiniteTimeSpan);
         state.PendingBatches[kind] = batch;
     }
 
@@ -465,13 +530,20 @@ internal sealed class Coalescer : BackgroundService
     }
 
     /// <summary>One in-flight, not-yet-flushed coalescing episode for a single (Hwnd, Kind) pair.</summary>
-    private sealed class PendingBatch(nint hwnd, IntentKind kind, uint dwmsEventTimeMs)
+    private sealed class PendingBatch(nint hwnd, IntentKind kind, uint dwmsEventTimeMs, TimeSpan delay)
     {
         public nint Hwnd { get; } = hwnd;
 
         public IntentKind Kind { get; } = kind;
 
         public uint LastDwmsEventTimeMs { get; set; } = dwmsEventTimeMs;
+
+        /// <summary>
+        /// This batch's current flush wait — <see cref="_coalesceWindow"/> for most kinds,
+        /// <see cref="_admissionGrace"/> for a SHOW/genuinely-uncloaked <see cref="WindowAppeared"/>.
+        /// Only ever grows across a merge (see <see cref="MergeOrCreateLocked"/>), never shrinks.
+        /// </summary>
+        public TimeSpan Delay { get; set; } = delay;
 
         /// <summary>
         /// Set once, immediately after construction (never via an object initializer — the timer's

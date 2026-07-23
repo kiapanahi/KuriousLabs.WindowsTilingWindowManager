@@ -13,13 +13,22 @@ namespace Bastion.Win32.Tests;
 /// </summary>
 public sealed class CoalescerTests
 {
-    // Exercising the real shipped default (rather than an independently-chosen TimeSpan) also
-    // means these tests would catch a change to DefaultCoalesceWindow's value, not just to the
-    // mechanism around it.
+    // Exercising the real shipped defaults (rather than independently-chosen TimeSpans) also means
+    // these tests would catch a change to Default*'s value, not just to the mechanism around it.
     private static readonly TimeSpan s_coalesceWindow = Coalescer.DefaultCoalesceWindow;
+    private static readonly TimeSpan s_admissionGrace = Coalescer.DefaultAdmissionGrace;
 
-    private static Coalescer CreateCoalescer(FakeTimeProvider time, ICloakStateReader? cloakStateReader = null) =>
-        new(Channel.CreateUnbounded<WinEvent>().Reader, cloakStateReader ?? new FakeCloakStateReader(), time, s_coalesceWindow);
+    private static Coalescer CreateCoalescer(
+        FakeTimeProvider time,
+        ICloakStateReader? cloakStateReader = null,
+        IReconcileNowSignal? reconcileNowSignal = null) =>
+        new(
+            Channel.CreateUnbounded<WinEvent>().Reader,
+            cloakStateReader ?? new FakeCloakStateReader(),
+            reconcileNowSignal ?? new FakeReconcileNowSignal(),
+            time,
+            s_coalesceWindow,
+            s_admissionGrace);
 
     // --- Core coalescing mechanism ---------------------------------------------------------
 
@@ -38,7 +47,8 @@ public sealed class CoalescerTests
         coalescer.OnEvent(new WinEvent(Hwnd, PInvoke.EVENT_OBJECT_SHOW, DwmsEventTimeMs: 1_020));
         coalescer.OnEvent(new WinEvent(Hwnd, PInvoke.EVENT_OBJECT_SHOW, DwmsEventTimeMs: 1_040));
 
-        time.Advance(s_coalesceWindow);
+        // SHOW batches wait the (longer) admission grace, not the storm-coalescing window.
+        time.Advance(s_admissionGrace);
 
         Assert.True(coalescer.IntentReader.TryRead(out CoalescedIntent? intent));
         WindowAppeared appeared = Assert.IsType<WindowAppeared>(intent);
@@ -55,14 +65,14 @@ public sealed class CoalescerTests
         const nint Hwnd = 0x2000;
 
         coalescer.OnEvent(new WinEvent(Hwnd, PInvoke.EVENT_OBJECT_SHOW, DwmsEventTimeMs: 1_000));
-        time.Advance(s_coalesceWindow);
+        time.Advance(s_admissionGrace);
         Assert.True(coalescer.IntentReader.TryRead(out CoalescedIntent? first));
         Assert.IsType<WindowAppeared>(first);
 
         // Second event's DwmsEventTimeMs is well outside the coalescing window from the first —
         // a genuinely separate occurrence, not a continuation of the same burst.
         coalescer.OnEvent(new WinEvent(Hwnd, PInvoke.EVENT_OBJECT_SHOW, DwmsEventTimeMs: 5_000));
-        time.Advance(s_coalesceWindow);
+        time.Advance(s_admissionGrace);
         Assert.True(coalescer.IntentReader.TryRead(out CoalescedIntent? second));
         Assert.IsType<WindowAppeared>(second);
 
@@ -88,7 +98,7 @@ public sealed class CoalescerTests
         Assert.IsType<WindowAppeared>(first);
         Assert.False(coalescer.IntentReader.TryRead(out _)); // the second batch is still pending its own timer
 
-        time.Advance(s_coalesceWindow);
+        time.Advance(s_admissionGrace);
         Assert.True(coalescer.IntentReader.TryRead(out CoalescedIntent? second));
         Assert.IsType<WindowAppeared>(second);
     }
@@ -103,14 +113,61 @@ public sealed class CoalescerTests
 
         coalescer.OnEvent(new WinEvent(Hwnd, PInvoke.EVENT_OBJECT_SHOW, DwmsEventTimeMs: 1_000));
 
-        // Advance almost to the deadline, then merge another event in — this should push the
-        // flush deadline out again rather than letting the original one fire.
-        time.Advance(TimeSpan.FromMilliseconds(50));
-        coalescer.OnEvent(new WinEvent(Hwnd, PInvoke.EVENT_OBJECT_SHOW, DwmsEventTimeMs: 1_050));
-        time.Advance(TimeSpan.FromMilliseconds(50));
-        Assert.False(coalescer.IntentReader.TryRead(out _)); // would have fired by now if not extended
+        // Advance to just before the batch's original (un-extended) admission-grace deadline
+        // (150 ms), then merge another event in — this should push the flush deadline out again
+        // rather than letting the original one fire.
+        time.Advance(TimeSpan.FromMilliseconds(120));
+        coalescer.OnEvent(new WinEvent(Hwnd, PInvoke.EVENT_OBJECT_SHOW, DwmsEventTimeMs: 1_010));
+
+        // 120 + 100 = 220 ms since the first event: past where the *original* deadline (150 ms)
+        // would have fired, but short of the *extended* one (120 + 150 = 270 ms) — would have
+        // fired by now if the merge hadn't correctly reset the timer.
+        time.Advance(TimeSpan.FromMilliseconds(100));
+        Assert.False(coalescer.IntentReader.TryRead(out _));
+
+        time.Advance(TimeSpan.FromMilliseconds(100));
+        Assert.True(coalescer.IntentReader.TryRead(out CoalescedIntent? intent));
+        Assert.IsType<WindowAppeared>(intent);
+    }
+
+    [Fact]
+    public void ShowWaitsTheLongerAdmissionGraceRatherThanTheStormCoalescingWindow()
+    {
+        // Codex review finding on this PR: SHOW must honor DESIGN.md §5's ~150 ms admission grace,
+        // not just the ~75 ms storm-coalescing window every other kind uses.
+        SynchronizationContext.SetSynchronizationContext(null);
+        var time = new FakeTimeProvider();
+        using Coalescer coalescer = CreateCoalescer(time);
+        const nint Hwnd = 0x3900;
+
+        coalescer.OnEvent(new WinEvent(Hwnd, PInvoke.EVENT_OBJECT_SHOW, DwmsEventTimeMs: 1_000));
 
         time.Advance(s_coalesceWindow);
+        Assert.False(coalescer.IntentReader.TryRead(out _)); // not yet — admission grace is longer
+
+        time.Advance(s_admissionGrace - s_coalesceWindow);
+        Assert.True(coalescer.IntentReader.TryRead(out CoalescedIntent? intent));
+        Assert.IsType<WindowAppeared>(intent);
+    }
+
+    [Fact]
+    public void ANameChangeMergingIntoAPendingShowBatchDoesNotShortenItsAdmissionGrace()
+    {
+        // A NAMECHANGE alone only asks for the shorter _coalesceWindow (see
+        // NameChangeMapsToWindowAppearedAndIsRateLimitedLikeAnyOtherBurst), but merging into an
+        // already-pending SHOW batch must never cut that batch's longer admission grace short.
+        SynchronizationContext.SetSynchronizationContext(null);
+        var time = new FakeTimeProvider();
+        using Coalescer coalescer = CreateCoalescer(time);
+        const nint Hwnd = 0x3A00;
+
+        coalescer.OnEvent(new WinEvent(Hwnd, PInvoke.EVENT_OBJECT_SHOW, DwmsEventTimeMs: 1_000));
+        coalescer.OnEvent(new WinEvent(Hwnd, PInvoke.EVENT_OBJECT_NAMECHANGE, DwmsEventTimeMs: 1_010));
+
+        time.Advance(s_coalesceWindow);
+        Assert.False(coalescer.IntentReader.TryRead(out _)); // still gated on the admission grace
+
+        time.Advance(s_admissionGrace - s_coalesceWindow);
         Assert.True(coalescer.IntentReader.TryRead(out CoalescedIntent? intent));
         Assert.IsType<WindowAppeared>(intent);
     }
@@ -216,7 +273,10 @@ public sealed class CoalescerTests
         const nint Hwnd = 0x5800;
 
         coalescer.OnEvent(new WinEvent(Hwnd, PInvoke.EVENT_OBJECT_UNCLOAKED, DwmsEventTimeMs: 1_000));
-        time.Advance(s_coalesceWindow);
+
+        // Genuine-UNCLOAKED is an admission trigger just like SHOW, so it also waits the (longer)
+        // admission grace, not the storm-coalescing window.
+        time.Advance(s_admissionGrace);
 
         Assert.True(coalescer.IntentReader.TryRead(out CoalescedIntent? intent));
         Assert.IsType<WindowAppeared>(intent);
@@ -284,6 +344,9 @@ public sealed class CoalescerTests
         coalescer.OnEvent(new WinEvent(Hwnd, PInvoke.EVENT_OBJECT_NAMECHANGE, DwmsEventTimeMs: 1_000));
         coalescer.OnEvent(new WinEvent(Hwnd, PInvoke.EVENT_OBJECT_NAMECHANGE, DwmsEventTimeMs: 1_020));
 
+        // NAMECHANGE alone (no SHOW/UNCLOAKED in the mix) rate-limits on the shorter
+        // _coalesceWindow, not SHOW's admission grace — it re-evaluates a window already past
+        // admission, not one that might still be self-sizing.
         time.Advance(s_coalesceWindow);
 
         Assert.True(coalescer.IntentReader.TryRead(out CoalescedIntent? intent));
@@ -313,11 +376,12 @@ public sealed class CoalescerTests
     // --- Intent channel overflow -------------------------------------------------------------
 
     [Fact]
-    public void OverflowingTheIntentChannelDropsWritesAndCountsThem()
+    public void OverflowingTheIntentChannelDropsWritesCountsThemAndSignalsReconcileNow()
     {
         SynchronizationContext.SetSynchronizationContext(null);
         var time = new FakeTimeProvider();
-        using Coalescer coalescer = CreateCoalescer(time);
+        var reconcileNowSignal = new FakeReconcileNowSignal();
+        using Coalescer coalescer = CreateCoalescer(time, reconcileNowSignal: reconcileNowSignal);
         const int OverflowBy = 10;
 
         // Distinct Hwnds never coalesce with each other, so each of these becomes its own pending
@@ -329,9 +393,16 @@ public sealed class CoalescerTests
         }
 
         Assert.Equal(0, coalescer.DroppedIntentCount);
-        time.Advance(s_coalesceWindow);
+        Assert.Equal(0, reconcileNowSignal.RequestCount);
+        time.Advance(s_admissionGrace);
 
         Assert.Equal(OverflowBy, coalescer.DroppedIntentCount);
+
+        // Codex review finding on this PR: DESIGN.md §3.4's distrust-escalation trigger list names
+        // "queue overflow" generally, not only the ingest channel's — every dropped intent here
+        // must also request an immediate reconciliation, the same recovery signal the WinEvent
+        // ingest channel's own overflow already uses (GitHub issue #1).
+        Assert.Equal(OverflowBy, reconcileNowSignal.RequestCount);
 
         var read = 0;
         while (coalescer.IntentReader.TryRead(out _))
@@ -366,7 +437,7 @@ public sealed class CoalescerTests
     {
         var time = new FakeTimeProvider();
         Assert.Throws<ArgumentNullException>(() =>
-            new Coalescer(null!, new FakeCloakStateReader(), time, s_coalesceWindow));
+            new Coalescer(null!, new FakeCloakStateReader(), new FakeReconcileNowSignal(), time, s_coalesceWindow, s_admissionGrace));
     }
 
     [Fact]
@@ -374,14 +445,22 @@ public sealed class CoalescerTests
     {
         var time = new FakeTimeProvider();
         Assert.Throws<ArgumentNullException>(() =>
-            new Coalescer(Channel.CreateUnbounded<WinEvent>().Reader, null!, time, s_coalesceWindow));
+            new Coalescer(Channel.CreateUnbounded<WinEvent>().Reader, null!, new FakeReconcileNowSignal(), time, s_coalesceWindow, s_admissionGrace));
+    }
+
+    [Fact]
+    public void ConstructorRejectsANullReconcileNowSignal()
+    {
+        var time = new FakeTimeProvider();
+        Assert.Throws<ArgumentNullException>(() =>
+            new Coalescer(Channel.CreateUnbounded<WinEvent>().Reader, new FakeCloakStateReader(), null!, time, s_coalesceWindow, s_admissionGrace));
     }
 
     [Fact]
     public void ConstructorRejectsANullTimeProvider()
     {
         Assert.Throws<ArgumentNullException>(() =>
-            new Coalescer(Channel.CreateUnbounded<WinEvent>().Reader, new FakeCloakStateReader(), null!, s_coalesceWindow));
+            new Coalescer(Channel.CreateUnbounded<WinEvent>().Reader, new FakeCloakStateReader(), new FakeReconcileNowSignal(), null!, s_coalesceWindow, s_admissionGrace));
     }
 
     [Theory]
@@ -391,7 +470,29 @@ public sealed class CoalescerTests
     {
         var time = new FakeTimeProvider();
         Assert.Throws<ArgumentOutOfRangeException>(() =>
-            new Coalescer(Channel.CreateUnbounded<WinEvent>().Reader, new FakeCloakStateReader(), time, TimeSpan.FromMilliseconds(milliseconds)));
+            new Coalescer(
+                Channel.CreateUnbounded<WinEvent>().Reader,
+                new FakeCloakStateReader(),
+                new FakeReconcileNowSignal(),
+                time,
+                TimeSpan.FromMilliseconds(milliseconds),
+                s_admissionGrace));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-150)]
+    public void ConstructorRejectsANonPositiveAdmissionGrace(double milliseconds)
+    {
+        var time = new FakeTimeProvider();
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new Coalescer(
+                Channel.CreateUnbounded<WinEvent>().Reader,
+                new FakeCloakStateReader(),
+                new FakeReconcileNowSignal(),
+                time,
+                s_coalesceWindow,
+                TimeSpan.FromMilliseconds(milliseconds)));
     }
 
     // --- BackgroundService hosting wiring ----------------------------------------------------
@@ -401,7 +502,13 @@ public sealed class CoalescerTests
     {
         var time = new FakeTimeProvider();
         var ingest = Channel.CreateUnbounded<WinEvent>();
-        using var coalescer = new Coalescer(ingest.Reader, new FakeCloakStateReader(), time, s_coalesceWindow);
+        using var coalescer = new Coalescer(
+            ingest.Reader,
+            new FakeCloakStateReader(),
+            new FakeReconcileNowSignal(),
+            time,
+            s_coalesceWindow,
+            s_admissionGrace);
         const nint Hwnd = 0xB000;
 
         await coalescer.StartAsync(TestContext.Current.CancellationToken);
@@ -419,7 +526,7 @@ public sealed class CoalescerTests
             CoalescedIntent? intent = null;
             for (var attempt = 0; attempt < 200 && intent is null; attempt++)
             {
-                time.Advance(s_coalesceWindow);
+                time.Advance(s_admissionGrace);
                 if (coalescer.IntentReader.TryRead(out intent))
                 {
                     break;
