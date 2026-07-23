@@ -36,4 +36,44 @@ internal static class HookDiagnostics
     public static void LogMessageLoopFault() =>
         Console.Error.WriteLine(
             "[Bastion.Win32] WinEvent pump's GetMessage loop returned -1 (error); exiting the pump loop.");
+
+    /// <summary>
+    /// Logs a failed <c>PostThreadMessage(WM_QUIT)</c> call from <c>StopAsync</c> — per its own
+    /// documented failure modes, the pump thread's message queue may not exist yet, the thread id
+    /// may already be stale, a UIPI integrity-level check may have blocked it, or the per-queue
+    /// message quota may have been hit. Not immediately fatal on its own: <c>StopAsync</c>'s
+    /// bounded <c>Thread.Join</c> still turns a pump that never receives <c>WM_QUIT</c> into an
+    /// observable <see cref="TimeoutException"/> rather than a silent hang, but a genuine
+    /// occurrence of this specific failure should be visible rather than discarded (the call site
+    /// previously ignored this return value outright).
+    /// </summary>
+    public static void LogPostQuitMessageFailed(uint threadId) =>
+        Console.Error.WriteLine(
+            $"[Bastion.Win32] PostThreadMessage(WM_QUIT) to thread {threadId} failed; the WinEvent " +
+            "pump may not exit until StopAsync's join timeout.");
+
+    /// <summary>
+    /// Logs a hook that failed to unregister via <c>UnhookWinEvent</c>. Per
+    /// docs/engineering/interop.md §3.2, a failed unhook means the hook may still be registered,
+    /// so its shared callback context is deliberately retained rather than freed — see
+    /// <see cref="LogHookContextLeakedAfterFailedUnhook"/>.
+    /// </summary>
+    public static void LogUnhookWinEventFailed(nint hookHandle) =>
+        Console.Error.WriteLine(
+            $"[Bastion.Win32] UnhookWinEvent failed for hook 0x{hookHandle:X}; it may still be " +
+            "registered, so its callback context will not be freed.");
+
+    /// <summary>
+    /// Logs that the WinEvent pump's shared <c>GCHandle</c> callback context is being
+    /// deliberately leaked because at least one hook failed to unregister (see
+    /// <see cref="LogUnhookWinEventFailed"/>). Freeing it anyway risks a still-live native
+    /// registration invoking <see cref="WinEventPumpService"/>'s callback with a
+    /// <c>GCHandle</c> that no longer resolves to a valid target — an intentional, logged leak on
+    /// this abnormal shutdown path is far safer than that use-after-free class of bug, matching
+    /// this codebase's general fail-soft/degrade-rather-than-crash posture.
+    /// </summary>
+    public static void LogHookContextLeakedAfterFailedUnhook() =>
+        Console.Error.WriteLine(
+            "[Bastion.Win32] at least one WinEvent hook failed to unregister; intentionally " +
+            "leaking its shared callback context rather than risking a use-after-free.");
 }

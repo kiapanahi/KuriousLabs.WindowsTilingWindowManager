@@ -39,6 +39,19 @@ namespace Bastion.Win32;
 /// Not yet wired into the composition root (<c>Bastion.Daemon</c>) — that is GitHub issue #10;
 /// this type is constructed directly by tests today via <c>InternalsVisibleTo</c>.
 /// </para>
+/// <para>
+/// <b>Message-queue creation is forced explicitly, not assumed.</b> Verified against
+/// https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-setwineventhook and
+/// https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-postthreadmessagew: nothing in
+/// <c>SetWinEventHook</c>'s documented contract creates this thread's message queue as a side
+/// effect — its Remarks only require the calling thread to pump messages ("must have a message
+/// loop in order to receive events"), which is a distinct, weaker claim than "registration forces
+/// the queue to exist." <c>PostThreadMessage</c>'s own Remarks document the queue-creation problem
+/// directly and give the fix verbatim: call <c>PeekMessage</c> once with <c>PM_NOREMOVE</c> to
+/// force the queue into existence. <see cref="PumpLoop"/> does exactly that
+/// (<see cref="ForceMessageQueueCreation"/>) before signaling <see cref="_threadReady"/>, so
+/// <see cref="StopAsync"/>'s <c>PostThreadMessage</c> can never race a not-yet-existent queue.
+/// </para>
 /// </remarks>
 [SuppressMessage(
     "Performance",
@@ -87,8 +100,15 @@ internal sealed class WinEventPumpService : IHostedService, IDisposable
     /// </summary>
     public ChannelReader<WinEvent> IngestReader => _ingestChannel.Reader;
 
+    /// <summary>
+    /// Test-observable: whether the pump's dedicated foreground OS thread is currently running.
+    /// Exposed only so tests can assert that a canceled <see cref="StartAsync"/> leaves no
+    /// orphaned pump thread behind, without reaching into private state via reflection.
+    /// </summary>
+    internal bool IsPumpThreadAlive => _pumpThread is { IsAlive: true };
+
     /// <inheritdoc />
-    public Task StartAsync(CancellationToken cancellationToken)
+    public async Task StartAsync(CancellationToken cancellationToken)
     {
         _pumpThread = new Thread(PumpLoop)
         {
@@ -97,11 +117,29 @@ internal sealed class WinEventPumpService : IHostedService, IDisposable
         };
         _pumpThread.Start();
 
-        // Wait for the pump to install its hook(s) and record its thread id before returning, so
-        // a subsequent StopAsync can never race PostThreadMessage against a not-yet-existent
-        // message queue (docs/engineering/daemon-architecture.md §2).
-        _threadReady.Wait(cancellationToken);
-        return Task.CompletedTask;
+        // Wait for the pump to install its hook(s) and force its own message queue into
+        // existence (PumpLoop's ForceMessageQueueCreation, run just before _threadReady.Set())
+        // before returning, so a subsequent StopAsync can never race PostThreadMessage against a
+        // not-yet-existent message queue (see the class remarks above).
+        try
+        {
+            _threadReady.Wait(cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            // A hosted service whose StartAsync fails is not guaranteed to receive StopAsync, and
+            // Dispose doesn't stop the pump either — so a canceled wait must itself stop the
+            // already-started pump thread before propagating, or the foreground thread can
+            // survive this call blocked in GetMessage. Reuse StopAsync's own stop-and-join logic
+            // rather than duplicating it. StopAsync's own cancellationToken parameter goes unused
+            // today (see its body); passing CancellationToken.None rather than the token that
+            // just canceled makes that explicit rather than accidental (CA2016). If the join
+            // itself times out, StopAsync's own TimeoutException surfaces here instead of the
+            // OperationCanceledException below — a stuck pump thread is the more urgent failure
+            // to report of the two.
+            await StopAsync(CancellationToken.None).ConfigureAwait(false);
+            throw;
+        }
     }
 
     /// <inheritdoc />
@@ -115,7 +153,14 @@ internal sealed class WinEventPumpService : IHostedService, IDisposable
             // documented way to end a message pump this class doesn't otherwise own control flow
             // of. PostThreadMessage posts without waiting; GetMessage retrieves it on the pump
             // thread's next loop iteration.
-            _ = PInvoke.PostThreadMessage(_pumpThreadId, PInvoke.WM_QUIT, wParam: default, lParam: default);
+            bool posted = PInvoke.PostThreadMessage(_pumpThreadId, PInvoke.WM_QUIT, wParam: default, lParam: default);
+            if (!posted)
+            {
+                // Not immediately fatal — the bounded Join below still turns a pump that misses
+                // WM_QUIT into an observable TimeoutException rather than a silent hang — but a
+                // genuine occurrence of this documented failure should be visible, not discarded.
+                HookDiagnostics.LogPostQuitMessageFailed(_pumpThreadId);
+            }
         }
 
         return _pumpThread is { } thread && !thread.Join(TimeSpan.FromSeconds(2))
@@ -134,6 +179,7 @@ internal sealed class WinEventPumpService : IHostedService, IDisposable
         try
         {
             RegisterHooks(contextHandle);
+            ForceMessageQueueCreation();
 
             // StartAsync's _threadReady.Wait(...) unblocks here — every hook that could register
             // has (DESIGN.md's WinEvents-are-hints posture means a partial registration is a
@@ -147,8 +193,19 @@ internal sealed class WinEventPumpService : IHostedService, IDisposable
             // UnhookWinEvent must run on the same thread that called SetWinEventHook — a verified
             // fact (docs/engineering/interop.md) — which is why this happens here, inside
             // PumpLoop, rather than from StopAsync's caller thread.
-            UnregisterHooks();
-            contextHandle.Free();
+            if (UnregisterHooks())
+            {
+                contextHandle.Free();
+            }
+            else
+            {
+                // interop.md §3.2: free the shared GCHandle only after every hook's
+                // UnhookWinEvent succeeded. At least one hook here may still be registered and
+                // could still invoke OnWinEvent with this same contextHandle — freeing it anyway
+                // risks that callback resolving a freed GCHandle. An intentional, logged leak is
+                // far safer than that use-after-free class of bug.
+                HookDiagnostics.LogHookContextLeakedAfterFailedUnhook();
+            }
 
             // Safety net: if RegisterHooks/something before the Set() call above ever threw
             // unexpectedly, this keeps StartAsync's Wait from hanging forever. A no-op on the
@@ -156,6 +213,22 @@ internal sealed class WinEventPumpService : IHostedService, IDisposable
             _threadReady.Set();
         }
     }
+
+    // DOCUMENTED CONTRACT — quoted verbatim from PostThreadMessageW's own Remarks
+    // (https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-postthreadmessagew#remarks):
+    // "The thread to which the message is posted must have created a message queue, or else the
+    // call to PostThreadMessage fails. ... call PeekMessage as shown here to force the system to
+    // create the message queue. PeekMessage(&msg, NULL, WM_USER, WM_USER, PM_NOREMOVE)". See the
+    // class remarks above for why this pump cannot rely on SetWinEventHook itself to have created
+    // the queue as a side effect. The WM_USER..WM_USER filter range is part of the documented
+    // idiom, not an arbitrary choice — it ensures nothing already queued is ever actually consumed.
+    private static void ForceMessageQueueCreation() =>
+        _ = PInvoke.PeekMessage(
+            out _,
+            HWND.Null,
+            wMsgFilterMin: PInvoke.WM_USER,
+            wMsgFilterMax: PInvoke.WM_USER,
+            PEEK_MESSAGE_REMOVE_TYPE.PM_NOREMOVE);
 
     private void RegisterHooks(GCHandle contextHandle)
     {
@@ -187,15 +260,26 @@ internal sealed class WinEventPumpService : IHostedService, IDisposable
             idThread: 0,
             dwFlags: PInvoke.WINEVENT_OUTOFCONTEXT | PInvoke.WINEVENT_SKIPOWNPROCESS);
 
-    private void UnregisterHooks()
+    /// <returns>
+    /// <see langword="true"/> if every registered hook's <c>UnhookWinEvent</c> call succeeded;
+    /// <see langword="false"/> if at least one failed, so <see cref="PumpLoop"/> knows the shared
+    /// <see cref="GCHandle"/> context is not yet safe to free (interop.md §3.2).
+    /// </returns>
+    private bool UnregisterHooks()
     {
+        bool allUnregistered = true;
         foreach (HWINEVENTHOOK hook in _registeredHooks)
         {
-            _ = PInvoke.UnhookWinEvent(hook);
-            s_hookContexts.TryRemove(hook, out _);
+            bool unhookSucceeded = PInvoke.UnhookWinEvent(hook);
+            if (!HookUnregistration.ApplyResult(hook, unhookSucceeded, s_hookContexts))
+            {
+                HookDiagnostics.LogUnhookWinEventFailed(hook);
+                allUnregistered = false;
+            }
         }
 
         _registeredHooks.Clear();
+        return allUnregistered;
     }
 
     private void RunMessageLoop()
@@ -256,7 +340,7 @@ internal sealed class WinEventPumpService : IHostedService, IDisposable
             }
 
             var writer = (ChannelWriter<WinEvent>)contextHandle.Target!;
-            HWND root = WindowProbe.GetRootAncestor(hwnd);
+            HWND root = WinEventRootNormalizer.NormalizeRoot(hwnd, WindowProbe.GetRootAncestor(hwnd));
             _ = writer.TryWrite(new WinEvent(root, eventId, dwmsEventTime));
         }
         catch (Exception ex)

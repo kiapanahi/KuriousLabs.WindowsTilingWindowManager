@@ -6,11 +6,14 @@ UnhookWinEvent
 GetAncestor
 IsWindowVisible
 GetMessage
+PeekMessage
 TranslateMessage
 DispatchMessage
 PostThreadMessage
 GetCurrentThreadId
 WM_QUIT
+WM_USER
+PEEK_MESSAGE_REMOVE_TYPE
 WINEVENT_OUTOFCONTEXT
 WINEVENT_SKIPOWNPROCESS
 OBJECT_IDENTIFIER
