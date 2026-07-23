@@ -33,6 +33,17 @@
     <!-- Hosting (Bastion.Daemon composition root) -->
     <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.10" />
 
+    <!--
+      Bastion.Win32 implements IHostedService (WinEventPumpService) but is not itself a
+      composition root/host builder, so it references only the abstractions package
+      (IHostedService lives in Microsoft.Extensions.Hosting.Abstractions per
+      learn.microsoft.com/dotnet/api/microsoft.extensions.hosting.ihostedservice) rather than the
+      full Microsoft.Extensions.Hosting meta-package above. Pinned to the same 10.0.10 build that
+      Microsoft.Extensions.Hosting 10.0.10 itself depends on, so CentralPackageTransitivePinningEnabled
+      has nothing to reconcile between the two references.
+    -->
+    <PackageVersion Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.10" />
+
     <!-- CLI argument parsing (Bastion.Cli) -->
     <PackageVersion Include="System.CommandLine" Version="2.0.10" />
 
