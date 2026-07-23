@@ -24,12 +24,31 @@ namespace Bastion.Win32;
 /// is asymmetric: failing admits nothing new; already-registered stays registered regardless.
 /// </para>
 /// <para>
-/// <b>HWND recycling correction.</b> If a lookup finds an entry for <paramref name="hwnd"/> whose
-/// recorded PID no longer matches the window's <em>current</em> live PID, that mismatch is itself
-/// authoritative proof the old window is gone even though its <c>EVENT_OBJECT_DESTROY</c> was
-/// never observed (DESIGN.md §9's HWND-recycling row cites the documented <c>IsWindow</c>
-/// recycling warning as exactly this risk) — the stale entry is evicted and a fresh one considered,
-/// in the same "reads are truth" spirit as the Reconciler's own heartbeat (DESIGN.md §1). This is a
+/// <b>Provisional UWP identity is retried, not frozen.</b> DESIGN.md §3.3/§9: UWP attribution
+/// "failure degrades to exe-path identity, retried on later SHOW/NAMECHANGE/FOREGROUND." An
+/// already-registered <c>ApplicationFrameWindow</c> whose resolved identity is not yet a real
+/// AUMID has its identity re-resolved on every subsequent <see cref="TryAdmitAsync"/> call, and
+/// the entry is upgraded in place (same <see cref="WindowId"/>/PID/first-seen — only
+/// <see cref="WindowRegistryEntry.Identity"/> changes) if a retry succeeds. This is scoped to
+/// <c>ApplicationFrameWindow</c> specifically rather than any non-AUMID identity generally: an
+/// ordinary desktop app's exe-path identity is not COM/UWP-timing-dependent and will never change
+/// on retry, so retrying it on every admission call would be pure waste with no chance of ever
+/// improving.
+/// </para>
+/// <para>
+/// <b>HWND recycling correction, both at lookup and at commit time.</b> If a lookup finds an entry
+/// for <paramref name="hwnd"/> whose recorded PID no longer matches the window's <em>current</em>
+/// live PID, that mismatch is itself authoritative proof the old window is gone even though its
+/// <c>EVENT_OBJECT_DESTROY</c> was never observed (DESIGN.md §9's HWND-recycling row cites the
+/// documented <c>IsWindow</c> recycling warning as exactly this risk) — the stale entry is evicted
+/// and a fresh one considered, in the same "reads are truth" spirit as the Reconciler's own
+/// heartbeat (DESIGN.md §1). The same live-PID check runs again immediately before committing a
+/// brand-new entry, inside the same lock: identity resolution crosses to <see cref="ShellComThread"/>
+/// and back, so the HWND can have been destroyed and recycled to a <em>different</em> window
+/// (whose own, faster admission may already have inserted the correct entry) while this call
+/// awaited. Committing this call's now-stale <c>(hwnd, pid)</c> pairing without revalidating would
+/// silently clobber that newer, correct entry with a ghost for a window that no longer exists —
+/// and since its <c>DESTROY</c> was already handled, nothing would ever purge the ghost. This is a
 /// read-driven correction, not a second event-driven purge path: <see cref="Purge"/> remains the
 /// only <em>proactive</em> removal DESIGN.md §3.3 commits to.
 /// </para>
@@ -38,7 +57,7 @@ namespace Bastion.Win32;
 /// crosses to <see cref="ShellComThread"/> and back, so two overlapping <see cref="TryAdmitAsync"/>
 /// calls for the same window are possible even though DESIGN.md's Reconciler (once GitHub issue #4
 /// lands) is itself single-threaded — nothing yet guarantees its calls into this registry are
-/// serialized one-at-a-time. The dictionary is guarded by a lock that is never held across the
+/// serialized one-at-a-time. The dictionary is guarded by a lock that is never held across an
 /// identity-resolution <see langword="await"/>, with a re-check immediately after it, so a race
 /// mints at most one <see cref="WindowId"/> per window rather than two.
 /// </para>
@@ -56,9 +75,9 @@ internal sealed class WindowRegistry(
 
     /// <summary>
     /// Evaluates <paramref name="hwnd"/> for admission (or returns its existing
-    /// <see cref="WindowId"/> if already registered). Safe to call on <c>SHOW</c>,
-    /// <c>UNCLOAKED</c>, or <c>NAMECHANGE</c> alike — see this type's remarks for why a failing
-    /// re-run never evicts an already-registered window.
+    /// <see cref="WindowId"/> if already registered, retrying a provisional UWP identity along the
+    /// way). Safe to call on <c>SHOW</c>, <c>UNCLOAKED</c>, or <c>NAMECHANGE</c> alike — see this
+    /// type's remarks for why a failing re-run never evicts an already-registered window.
     /// </summary>
     /// <returns>
     /// The window's <see cref="WindowId"/> if it is now (or was already) registered, or
@@ -82,10 +101,16 @@ internal sealed class WindowRegistry(
         WindowManageabilityInfo info = infoReader.Read(hwnd);
         bool isManageable = WindowManageabilityFilter.IsManageable(info, blocklist);
 
-        WindowId? existing = TryFindExisting(hwnd, pid);
+        WindowRegistryEntry? existing = TryFindExisting(hwnd, pid);
         if (existing is not null)
         {
-            return existing;
+            if (existing.Identity.Kind != WindowIdentityKind.Aumid
+                && string.Equals(info.ClassName, ApplicationFrameUwpAttributionProvider.ApplicationFrameWindowClassName, StringComparison.Ordinal))
+            {
+                await RetryProvisionalIdentityAsync(hwnd, pid, existing, cancellationToken).ConfigureAwait(false);
+            }
+
+            return existing.WindowId;
         }
 
         if (!isManageable)
@@ -97,10 +122,20 @@ internal sealed class WindowRegistry(
 
         lock (_lock)
         {
-            WindowId? racedExisting = TryFindExistingUnderLock(hwnd, pid);
+            // Revalidate: the window's live PID may have changed again while we awaited identity
+            // resolution (e.g. it was destroyed and its HWND recycled to a newer window whose own,
+            // faster admission already inserted a correct entry). Committing this call's now-stale
+            // (hwnd, pid) pairing would clobber that newer entry with a ghost for a window that no
+            // longer exists — see this type's remarks.
+            if (pidReader.TryReadProcessId(hwnd) != pid)
+            {
+                return null;
+            }
+
+            WindowRegistryEntry? racedExisting = TryFindExistingUnderLock(hwnd, pid);
             if (racedExisting is not null)
             {
-                return racedExisting;
+                return racedExisting.WindowId;
             }
 
             WindowId windowId = idMinter.Mint();
@@ -130,7 +165,29 @@ internal sealed class WindowRegistry(
         }
     }
 
-    private WindowId? TryFindExisting(HWND hwnd, uint pid)
+    private async Task RetryProvisionalIdentityAsync(
+        HWND hwnd, uint pid, WindowRegistryEntry previous, CancellationToken cancellationToken)
+    {
+        WindowIdentity retried = await identityResolver.ResolveAsync(hwnd, pid, cancellationToken).ConfigureAwait(false);
+        if (retried.Kind != WindowIdentityKind.Aumid)
+        {
+            return;
+        }
+
+        lock (_lock)
+        {
+            // Only upgrade if this is still the exact entry we retried for — it may have been
+            // purged, or replaced outright (a recycled HWND admitted as a different window), while
+            // this retry's resolution was in flight.
+            if (_entriesByHwnd.TryGetValue(hwnd, out WindowRegistryEntry? current)
+                && current.WindowId == previous.WindowId)
+            {
+                _entriesByHwnd[hwnd] = current with { Identity = retried };
+            }
+        }
+    }
+
+    private WindowRegistryEntry? TryFindExisting(HWND hwnd, uint pid)
     {
         lock (_lock)
         {
@@ -138,13 +195,13 @@ internal sealed class WindowRegistry(
         }
     }
 
-    private WindowId? TryFindExistingUnderLock(HWND hwnd, uint pid)
+    private WindowRegistryEntry? TryFindExistingUnderLock(HWND hwnd, uint pid)
     {
         if (_entriesByHwnd.TryGetValue(hwnd, out WindowRegistryEntry? entry))
         {
             if (entry.Pid == pid)
             {
-                return entry.WindowId;
+                return entry;
             }
 
             // Stale entry for a recycled HWND — see this type's remarks.

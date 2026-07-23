@@ -24,7 +24,10 @@ public sealed class ApplicationFrameUwpAttributionProviderTests
 
         foreach (HWND window in windows)
         {
-            if (!string.Equals(WindowProbe.GetClassName(window), "ApplicationFrameWindow", StringComparison.Ordinal))
+            if (!string.Equals(
+                WindowProbe.GetClassName(window),
+                ApplicationFrameUwpAttributionProvider.ApplicationFrameWindowClassName,
+                StringComparison.Ordinal))
             {
                 Assert.Null(provider.TryGetAumid(window));
             }

@@ -26,7 +26,13 @@ namespace Bastion.Win32;
 internal sealed class ApplicationFrameUwpAttributionProvider(IProcessAumidReader processAumidReader)
     : IUwpAttributionProvider
 {
-    private const string ApplicationFrameWindowClassName = "ApplicationFrameWindow";
+    /// <summary>
+    /// Shared with <see cref="WindowRegistry"/>, which needs the same class name to decide
+    /// whether an already-registered window's non-AUMID identity is worth retrying (DESIGN.md
+    /// §3.3's UWP-attribution retry note) rather than permanently settled.
+    /// </summary>
+    internal const string ApplicationFrameWindowClassName = "ApplicationFrameWindow";
+
     private const string CoreWindowClassName = "Windows.UI.Core.CoreWindow";
 
     // EnumChildWindows re-enters synchronously on the calling thread and completes before

@@ -182,4 +182,75 @@ public sealed class WindowRegistryTests
         Assert.Equal(results[0], results[1]);
         Assert.Equal(2, _identityResolver.CallCount);
     }
+
+    [Fact]
+    public async Task StaleAdmissionIsAbortedRatherThanClobberingARecycledHwndsNewerEntry()
+    {
+        // Codex review finding on PR #40: a slow admission for a since-recycled HWND must not
+        // commit a ghost entry for a window that no longer exists, even though nothing purged the
+        // registry in between (its DESTROY may already have been handled with no entry yet to
+        // purge, since this call had not committed anything at that point either).
+        _pidReader.SetPid(s_someWindow, SomePid);
+        var gate = new TaskCompletionSource();
+        _identityResolver.Gate = gate.Task;
+        WindowRegistry registry = CreateRegistry();
+
+        Task<WindowId?> stale = registry.TryAdmitAsync(s_someWindow, TestContext.Current.CancellationToken);
+
+        // The HWND is recycled to a different live window while the call above awaits identity
+        // resolution.
+        const uint recycledPid = 999;
+        _pidReader.SetPid(s_someWindow, recycledPid);
+        gate.SetResult();
+
+        // CA2007: unlike this file's other awaits (each directly on a fresh call expression),
+        // this one awaits a Task stored earlier and used concurrently with the code in between —
+        // ConfigureAwait(true) keeps xUnit's synchronization-context-preserving default explicit
+        // per this repo's test-code convention (never ConfigureAwait(false) in test code).
+        WindowId? result = await stale.ConfigureAwait(true);
+
+        Assert.Null(result);
+        Assert.Null(registry.TryGetEntry(s_someWindow));
+    }
+
+    [Fact]
+    public async Task ProvisionalUwpIdentityIsRetriedAndUpgradedOnLaterAdmission()
+    {
+        // Codex review finding on PR #40: DESIGN.md §3.3's UWP-attribution failure "retried on
+        // later SHOW/NAMECHANGE/FOREGROUND" must actually happen, not freeze the fallback forever.
+        _pidReader.SetPid(s_someWindow, SomePid);
+        _infoReader.SetInfo(
+            s_someWindow,
+            _infoReader.Default with { ClassName = ApplicationFrameUwpAttributionProvider.ApplicationFrameWindowClassName });
+        var provisional = new WindowIdentity(WindowIdentityKind.ExePath, @"C:\Windows\System32\ApplicationFrameHost.exe");
+        _identityResolver.Result = provisional;
+        WindowRegistry registry = CreateRegistry();
+        WindowId? admitted = await registry.TryAdmitAsync(s_someWindow, TestContext.Current.CancellationToken);
+        Assert.Equal(provisional, registry.TryGetEntry(s_someWindow)?.Identity);
+
+        // The CoreWindow child becomes attributable by the time of a later re-evaluation.
+        var upgraded = new WindowIdentity(WindowIdentityKind.Aumid, "Contoso.App_abc123!App");
+        _identityResolver.Result = upgraded;
+        WindowId? reEvaluated = await registry.TryAdmitAsync(s_someWindow, TestContext.Current.CancellationToken);
+
+        Assert.Equal(admitted, reEvaluated);
+        Assert.Equal(upgraded, registry.TryGetEntry(s_someWindow)?.Identity);
+        Assert.Equal(2, _identityResolver.CallCount);
+    }
+
+    [Fact]
+    public async Task ProvisionalIdentityOnAnOrdinaryWindowIsNeverRetried()
+    {
+        // Retrying is scoped to ApplicationFrameWindow specifically (see WindowRegistry's own
+        // remarks) -- an ordinary desktop app's non-AUMID identity is not COM/UWP-timing-dependent
+        // and will never change, so retrying it on every admission call would be pure waste.
+        _pidReader.SetPid(s_someWindow, SomePid);
+        _identityResolver.Result = WindowIdentity.Unknown;
+        WindowRegistry registry = CreateRegistry();
+        await registry.TryAdmitAsync(s_someWindow, TestContext.Current.CancellationToken);
+
+        await registry.TryAdmitAsync(s_someWindow, TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, _identityResolver.CallCount);
+    }
 }

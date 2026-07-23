@@ -82,12 +82,25 @@ internal sealed class PropertyStoreAumidReader(ShellComThread shellComThread) : 
     private static string? ReadAumid(IPropertyStore propertyStore)
     {
         HRESULT hr = propertyStore.GetValue(in PInvoke.PKEY_AppUserModel_ID, out PROPVARIANT value);
+        if (hr.Failed)
+        {
+            // GetValue's own documented contract makes no promise about *pv's contents on a
+            // failure HRESULT (only the success path's "vt is set to VT_EMPTY when absent" is
+            // documented) — the generated marshaller pre-zeros the out parameter before the call,
+            // so a well-behaved COM implementation that simply doesn't touch it on failure leaves
+            // a harmless all-zero (VT_EMPTY) PROPVARIANT, but nothing guarantees a *misbehaving*
+            // one didn't partially write before failing. PropVariantClear must never run against
+            // that undefined state, so skip it entirely on failure rather than trust either
+            // possibility.
+            return null;
+        }
+
         try
         {
             // Both documented success outcomes (S_OK and the positive INPLACE_S_TRUNCATED) satisfy
             // Succeeded; a present-but-empty property reads back as VT_EMPTY per GetValue's own
             // docs, which IPropertyStore.cs's remarks cite.
-            if (hr.Failed || value.vt != VARENUM.VT_LPWSTR)
+            if (value.vt != VARENUM.VT_LPWSTR)
             {
                 return null;
             }
@@ -97,6 +110,8 @@ internal sealed class PropertyStoreAumidReader(ShellComThread shellComThread) : 
         }
         finally
         {
+            // Reached only after a successful GetValue, so value is well-defined here regardless
+            // of which VARENUM it holds — safe to clear unconditionally within this branch.
             PInvoke.PropVariantClear(ref value);
         }
     }
