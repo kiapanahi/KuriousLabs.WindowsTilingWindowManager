@@ -292,17 +292,30 @@ internal partial interface IVirtualDesktopManager
 
 ### 4.2 Activation
 
+- **Correction (verified during GitHub issue #3's implementation):** `StrategyBasedComWrappers`
+  has **no static `Instance` member** — confirmed against
+  https://learn.microsoft.com/dotnet/api/system.runtime.interopservices.marshalling.strategybasedcomwrappers,
+  whose full member list is exactly one public parameterless constructor plus instance
+  methods/properties. An earlier revision of this doc incorrectly referenced
+  `StrategyBasedComWrappers.Instance` — construct and reuse your own instance instead (e.g. a
+  `private static readonly StrategyBasedComWrappers` field per consumer, as
+  `src/Bastion.Win32/PropertyStoreAumidReader.cs` does), never a nonexistent singleton accessor.
 - Activate via `CoCreateInstance` (CsWin32's `PInvoke.CoCreateInstance<T>`, or
-  a hand-written P/Invoke) followed by
-  `StrategyBasedComWrappers.Instance.GetOrCreateObjectForComInstance(pUnknown, CreateObjectFlags.Unwrap)`
+  a hand-written P/Invoke) followed by your own `StrategyBasedComWrappers` instance's
+  `GetOrCreateObjectForComInstance(pUnknown, CreateObjectFlags.Unwrap)`
   to obtain the managed interface.
 - **`new SomeCoClass()` activation syntax is unsupported** with source-generated
   COM — always go through the `CoCreateInstance` + `ComWrappers` path.
 - `ComWrappers.GetOrCreateObjectForComInstance` already performs identity
-  caching per underlying `IUnknown` — don't build a second cache on top of it,
-  but do plan for exactly one re-creation on the documented signal (e.g.
-  `TaskbarCreated` broadcast after an Explorer restart, DESIGN.md §9), never
-  speculatively on a timer or on every call.
+  caching per underlying `IUnknown` **and per `ComWrappers` instance it was called
+  on** — don't build a second cache on top of it, but do plan for exactly one
+  re-creation on the documented signal (e.g. `TaskbarCreated` broadcast after an
+  Explorer restart, DESIGN.md §9), never speculatively on a timer or on every
+  call. For a genuinely per-call target (no long-lived object to cache — e.g. a
+  distinct window's `IPropertyStore` on every call), pass
+  `CreateObjectFlags.UniqueInstance` instead and deterministically `Dispose()`
+  the returned wrapper (it implements `IDisposable` only when constructed with
+  this flag) immediately after use rather than leaving it for the GC.
 - To expose a managed sink to native code (e.g. a progress/notification
   callback), use `GetOrCreateComInterfaceForObject` instead.
 

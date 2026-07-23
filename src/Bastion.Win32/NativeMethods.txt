@@ -35,3 +35,22 @@ EVENT_OBJECT_UNCLOAKED
 // DESIGN.md §3.2/§4 cloak-burst-to-DesktopSwitchSuspected heuristic (Coalescer, issue #2).
 DwmGetWindowAttribute
 DWMWINDOWATTRIBUTE
+
+// Window Registry manageability filter and identity resolution (DESIGN.md §3.3, issue #3).
+GetWindowLongW
+GetClassName
+GetShellWindow
+GetWindow
+GetWindowThreadProcessId
+EnumChildWindows
+OpenProcess
+GetApplicationUserModelId
+QueryFullProcessImageNameW
+SHGetPropertyStoreForWindow
+PROPERTYKEY
+PROPVARIANT
+PropVariantClear
+CoInitializeEx
+CoUninitialize
+PKEY_AppUserModel_ID
+WINDOW_EX_STYLE

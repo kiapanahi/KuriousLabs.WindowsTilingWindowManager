@@ -9,10 +9,13 @@ namespace Bastion.Core;
 /// live window, for HWND recycling detection, and for PID/first-seen-timestamp bookkeeping.
 /// See DESIGN.md §3, §10.
 ///
-/// TODO(DESIGN.md §3.4): the adapter ring's identity-minting strategy (monotonic counter vs.
-/// content-derived key) is not yet finalized; <see cref="Value"/>'s only contract here is
-/// "opaque, stable, equatable" — do not assign meaning to its numeric value outside
-/// <c>Bastion.Win32</c>.
+/// Minting strategy (DESIGN.md §3.4, GitHub issue #3): a process-lifetime monotonic counter,
+/// implemented by <c>Bastion.Win32</c>'s <c>WindowIdMinter</c> and called exactly once per
+/// <em>new</em> Window Registry entry — never per HWND value, since HWNDs recycle and a
+/// re-admitted window after a missed <c>EVENT_OBJECT_DESTROY</c> still gets a fresh id. The
+/// opaque numeric value carries no meaning outside <c>Bastion.Win32</c> beyond this file's own
+/// "stable, equatable" contract — do not derive ordering, persistence, or cross-run identity from
+/// it.
 /// </remarks>
 public readonly record struct WindowId
 {
