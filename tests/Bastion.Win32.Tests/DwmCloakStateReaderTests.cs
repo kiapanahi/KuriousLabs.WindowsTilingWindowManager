@@ -34,12 +34,14 @@ public sealed class DwmCloakStateReaderTests
     {
         var reader = new DwmCloakStateReader();
 
-        // An HWND value that (almost certainly) never identifies a real window on this session —
-        // exercises the documented-failure path (a HWND that doesn't resolve makes
-        // DwmGetWindowAttribute return a failing HRESULT) without needing a live window to
-        // fabricate the failure. DwmCloakStateReader's own remarks document the conservative
-        // false-on-failure default this asserts.
-        bool result = reader.IsCloaked(unchecked((nint)0xDEADBEEF));
+        // nint.Zero is deterministically never a valid window handle (unlike a fixed-looking
+        // sentinel value, which — however astronomically unlikely — could theoretically coincide
+        // with a real handle on some session, per a Copilot review finding on this PR). Exercises
+        // the documented-failure path (a HWND that doesn't resolve makes DwmGetWindowAttribute
+        // return a failing HRESULT) without needing a live window to fabricate the failure.
+        // DwmCloakStateReader's own remarks document the conservative false-on-failure default
+        // this asserts.
+        bool result = reader.IsCloaked(nint.Zero);
 
         Assert.False(result);
     }

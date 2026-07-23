@@ -131,6 +131,35 @@ public sealed class CoalescerTests
     }
 
     [Fact]
+    public void ADwmsEventTimeDeltaAtTheExactWraparoundBoundaryDoesNotThrow()
+    {
+        // Regression test for a Copilot review finding on this PR: at a wraparound-corrected
+        // signed delta of exactly int.MinValue (a ~24.8 day gap between two events on the same
+        // (Hwnd, Kind) pair), Math.Abs(int) throws OverflowException. 0x80000000's unsigned
+        // difference from 0 reinterprets as exactly int.MinValue once cast — the one input that
+        // used to crash IsWithinCoalesceWindow.
+        SynchronizationContext.SetSynchronizationContext(null);
+        var time = new FakeTimeProvider();
+        using Coalescer coalescer = CreateCoalescer(time);
+        const nint Hwnd = 0x3B00;
+
+        coalescer.OnEvent(new WinEvent(Hwnd, PInvoke.EVENT_OBJECT_SHOW, DwmsEventTimeMs: 0));
+
+        // Must not throw OverflowException.
+        coalescer.OnEvent(new WinEvent(Hwnd, PInvoke.EVENT_OBJECT_SHOW, DwmsEventTimeMs: 0x80000000));
+
+        // A gap this large is correctly treated as NOT the same burst: the first batch flushes
+        // immediately (synchronously, on the wide-gap detection), and the second gets its own
+        // fresh admission-grace timer.
+        Assert.True(coalescer.IntentReader.TryRead(out CoalescedIntent? first));
+        Assert.IsType<WindowAppeared>(first);
+
+        time.Advance(s_admissionGrace);
+        Assert.True(coalescer.IntentReader.TryRead(out CoalescedIntent? second));
+        Assert.IsType<WindowAppeared>(second);
+    }
+
+    [Fact]
     public void ShowWaitsTheLongerAdmissionGraceRatherThanTheStormCoalescingWindow()
     {
         // Codex review finding on this PR: SHOW must honor DESIGN.md §5's ~150 ms admission grace,

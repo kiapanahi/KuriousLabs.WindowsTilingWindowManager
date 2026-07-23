@@ -444,7 +444,12 @@ internal sealed class Coalescer : BackgroundService
         // as long as the true elapsed time between the two events is under ~24.8 days, which any
         // realistic coalescing window here is, by many orders of magnitude.
         int deltaMs = unchecked((int)(currentDwmsEventTimeMs - lastDwmsEventTimeMs));
-        return Math.Abs(deltaMs) <= _coalesceWindow.TotalMilliseconds;
+
+        // Cast to long before Abs: at the exact wraparound boundary deltaMs can legitimately equal
+        // int.MinValue, and Math.Abs(int) throws OverflowException for that one value specifically
+        // (Copilot review finding on this PR) — Math.Abs(long) has no equivalent edge case here,
+        // since an int-derived magnitude sits nowhere near long.MinValue's.
+        return Math.Abs((long)deltaMs) <= _coalesceWindow.TotalMilliseconds;
     }
 
     private void OnFlushTimerFired(object? state)
