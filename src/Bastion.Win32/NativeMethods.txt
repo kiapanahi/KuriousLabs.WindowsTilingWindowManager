@@ -1,0 +1,6 @@
+GetWindowRect
+SetWindowPos
+EnumWindows
+SetWinEventHook
+GetAncestor
+IsWindowVisible

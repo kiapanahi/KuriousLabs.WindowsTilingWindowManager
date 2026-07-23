@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Design & architecture (read first)
+    url: https://github.com/kiapanahi/KuriousLabs.WindowsTilingWindowManager/blob/main/DESIGN.md
+    about: The source of truth for architecture and rationale — check here before filing anything design-related.

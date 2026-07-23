@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Bastion.Core</RootNamespace>
+    <AssemblyName>Bastion.Core</AssemblyName>
+
+    <!-- Pure library: no Win32 types, must build/test on Linux CI. DESIGN.md §3, §10. -->
+    <IsAotCompatible>true</IsAotCompatible>
+  </PropertyGroup>
+
+</Project>

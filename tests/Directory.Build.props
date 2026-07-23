@@ -1,0 +1,26 @@
+<Project>
+
+  <!--
+    Chain to the root Directory.Build.props — without this explicit import, this nested file would
+    silently REPLACE (not merge with) the root's CPM wiring, pinned LangVersion, analyzer
+    configuration, and BannedSymbols.txt AdditionalFiles registration. Verbatim pattern from
+    docs/engineering/quality-gates.md §2.
+  -->
+  <Import Project="$([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '$(MSBuildThisFileDirectory)../'))"
+          Condition="'' != $([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '$(MSBuildThisFileDirectory)../'))" />
+
+  <!--
+    xUnit v3 runs on Microsoft.Testing.Platform (MTP), not VSTest — every test project is its own
+    executable. global.json already opts the `dotnet test` CLI into the MTP runner
+    (test.runner = Microsoft.Testing.Platform). docs/engineering/testing.md §1.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner>
+    <IsPackable>false</IsPackable>
+
+    <!-- Test assemblies are not shipped/AOT-published; the AOT/trim analyzers add pure noise here. -->
+    <IsAotCompatible>false</IsAotCompatible>
+  </PropertyGroup>
+
+</Project>

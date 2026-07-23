@@ -1,0 +1,17 @@
+RegisterClassEx
+CreateWindowEx
+DefWindowProc
+GetMessage
+TranslateMessage
+DispatchMessage
+DestroyWindow
+PostQuitMessage
+GetModuleHandle
+LoadCursor
+IDC_ARROW
+ShowWindow
+UpdateWindow
+CW_USEDEFAULT
+WM_DESTROY
+WM_GETMINMAXINFO
+MINMAXINFO

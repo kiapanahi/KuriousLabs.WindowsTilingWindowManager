@@ -1,0 +1,17 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Bastion.Cli/Bastion.Cli.csproj" />
+    <Project Path="src/Bastion.Core/Bastion.Core.csproj" />
+    <Project Path="src/Bastion.Daemon/Bastion.Daemon.csproj" />
+    <Project Path="src/Bastion.Layout/Bastion.Layout.csproj" />
+    <Project Path="src/Bastion.TestWindows/Bastion.TestWindows.csproj" />
+    <Project Path="src/Bastion.Win32/Bastion.Win32.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Bastion.Core.Tests/Bastion.Core.Tests.csproj" />
+    <Project Path="tests/Bastion.Layout.Tests/Bastion.Layout.Tests.csproj" />
+    <Project Path="tests/Bastion.Win32.Tests/Bastion.Win32.Tests.csproj">
+      <Platform Project="x64" />
+    </Project>
+  </Folder>
+</Solution>

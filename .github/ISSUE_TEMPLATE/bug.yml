@@ -1,0 +1,45 @@
+name: Bug report
+description: Something documented/expected does not hold in practice.
+title: "[Bug]: "
+labels: ["type:bug"]
+body:
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What DESIGN.md/docs say should happen, with a section reference.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: >-
+        What actually happens. Include your Windows build number (`winver`) if the bug
+        could be OS-version-sensitive — DESIGN.md targets Windows 11 25H2, build 26200,
+        specifically.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - area:core
+        - area:layout
+        - area:win32
+        - area:daemon
+        - area:cli
+        - area:bar
+        - area:ipc
+        - area:ci
+        - area:docs
+    validations:
+      required: true

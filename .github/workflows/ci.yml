@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Bastion.Core / Bastion.Layout are the only two projects with no Win32 types
+  # (CLAUDE.md project table, DESIGN.md §10) — this job is what "Linux-CI-tested" means
+  # in practice. Every other project targets net10.0-windows and/or depends on CsWin32.
+  core-layout-linux:
+    name: Core & Layout (Linux, Tier 1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      # dotnet build only ever targets one project or solution per invocation, so each
+      # project is built explicitly rather than passed as a list. Building the *.Tests
+      # project transitively builds the library it references.
+      - name: Build Bastion.Core.Tests (+ Bastion.Core), warnings as errors
+        run: dotnet build tests/Bastion.Core.Tests/Bastion.Core.Tests.csproj --configuration Release -warnaserror
+      - name: Build Bastion.Layout.Tests (+ Bastion.Layout), warnings as errors
+        run: dotnet build tests/Bastion.Layout.Tests/Bastion.Layout.Tests.csproj --configuration Release -warnaserror
+
+      # Main gate query filter per docs/engineering/testing.md §2 — excludes Tier 3
+      # (Quarantined) and Tier 5 (Canary), neither of which exist in these two projects.
+      - name: Test Bastion.Core.Tests
+        run: dotnet test tests/Bastion.Core.Tests/Bastion.Core.Tests.csproj --configuration Release --filter-query "/[Category!=Quarantined]"
+      - name: Test Bastion.Layout.Tests
+        run: dotnet test tests/Bastion.Layout.Tests/Bastion.Layout.Tests.csproj --configuration Release --filter-query "/[Category!=Quarantined]"
+
+  # The canonical 4-step gate sequence from docs/engineering/quality-gates.md §8,
+  # run against the whole solution (Bastion.slnx — every project restores/builds on
+  # Windows; CsWin32/COM/AOT-adjacent code requires it).
+  build-test-format-publish-windows:
+    name: Build, test, format, publish (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Build (warnings as errors — quality-gates.md §8 step 1)
+        run: dotnet build Bastion.slnx --configuration Release -warnaserror
+
+      - name: Test (main gate — quality-gates.md §8 step 2)
+        run: dotnet test Bastion.slnx --configuration Release --filter-query "/[Category!=Quarantined]"
+
+      - name: Format check (quality-gates.md §8 step 3)
+        run: dotnet format Bastion.slnx --verify-no-changes --severity error
+
+      # Never dotnet build -t:Publish — only dotnet publish exercises real trim/AOT
+      # analysis (quality-gates.md §7, §8; interop.md Forbidden list).
+      - name: Publish bastiond win-x64 (AOT/trim validation — quality-gates.md §8 step 4)
+        run: dotnet publish src/Bastion.Daemon -r win-x64 --configuration Release
+      - name: Publish bastionc win-x64 (AOT/trim validation — quality-gates.md §8 step 4)
+        run: dotnet publish src/Bastion.Cli -r win-x64 --configuration Release
+
+# Deliberately not wired up yet — tracked as issues rather than left as a silent gap:
+#
+# - Tier 3 (quarantined real-window integration tests, testing.md §7): no test currently
+#   carries [Trait("Category", "Quarantined")]. Microsoft.Testing.Platform treats zero
+#   discovered tests in a filtered run as a hard failure (exit code 8), not a no-op —
+#   testing.md §1/§2 — so wiring this job against an empty filter would be red on every
+#   run for the wrong reason. Add it once the first real Bastion.TestWindows-driven
+#   integration test lands, with continue-on-error: true (testing.md §2).
+# - Tier 5 (behavior canaries, testing.md §7): same reasoning — no test currently carries
+#   [Trait("Category", "Canary")]. Add this job (non-blocking, opening tracked issues on
+#   failure per DESIGN.md §11) once the first canary test lands. Note testing.md §7's own
+#   caveat: windows-latest is Server 2025 build 26100, not the 25H2/26200 DESIGN.md
+#   actually targets — a green run there is a weaker proxy, not equivalent validation.
+# - Tier 4 (Windows Sandbox smoke test): explicitly local/self-hosted only per DESIGN.md
+#   §11 — not a hosted-runner CI job by design.

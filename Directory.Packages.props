@@ -1,0 +1,82 @@
+<Project>
+
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <CentralPackageTransitivePinningEnabled>true</CentralPackageTransitivePinningEnabled>
+  </PropertyGroup>
+
+  <!--
+    Repo-wide analyzers, applied to every project automatically (SDK-style projects only).
+    See docs/engineering/quality-gates.md §1/§6.
+  -->
+  <ItemGroup>
+    <GlobalPackageReference Include="Microsoft.CodeAnalysis.BannedApiAnalyzers" Version="5.6.0" PrivateAssets="all" />
+    <GlobalPackageReference Include="Roslynator.Analyzers" Version="4.15.0" PrivateAssets="all" />
+    <GlobalPackageReference Include="Meziantou.Analyzer" Version="3.0.123" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!--
+    Package versions consumed by individual projects via bare <PackageReference>.
+    One entry per package id, repo-wide, per docs/engineering/quality-gates.md §1.
+  -->
+  <ItemGroup>
+    <!-- Win32/COM interop (Bastion.Win32 only) -->
+    <PackageVersion Include="Microsoft.Windows.CsWin32" Version="0.3.298" />
+
+    <!--
+      Threading analyzer — scoped to Bastion.Win32/Bastion.Daemon only via a conditional
+      ItemGroup in those two .csproj files, deliberately NOT a GlobalPackageReference.
+      See docs/engineering/quality-gates.md §6.
+    -->
+    <PackageVersion Include="Microsoft.VisualStudio.Threading.Analyzers" Version="18.7.23" />
+
+    <!-- Hosting (Bastion.Daemon composition root) -->
+    <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.10" />
+
+    <!-- CLI argument parsing (Bastion.Cli) -->
+    <PackageVersion Include="System.CommandLine" Version="2.0.10" />
+
+    <!--
+      Testing: xUnit v3 on Microsoft.Testing.Platform (MTP) v2.
+
+      DEVIATION FROM docs/engineering/testing.md §1 (which names the package as plain "xunit.v3",
+      MTP v1 line) — corrected here per the standing pragmatic-fix authorization: the plain
+      "xunit.v3" meta-package's own nuspec unconditionally depends on "xunit.v3.mtp-v1" (its
+      description literally states "Installing this package installs xunit.v3.mtp-v1" — there is
+      no MSBuild property or TFM-conditional group that selects mtp-v2 instead; the only way to get
+      the v2-line dependency chain is to reference the sibling meta-package "xunit.v3.mtp-v2"
+      directly, confirmed by fetching and reading both nuspecs from
+      api.nuget.org/v3-flatcontainer/xunit.v3(.mtp-v2)/3.2.2/...nuspec). Microsoft.Testing.Extensions.CodeCoverage
+      18.9.0 (and every 18.x release back to 18.4.1, confirmed via their nuspecs) hard-depends on
+      Microsoft.Testing.Platform >= 2.x, so "xunit.v3.mtp-v1"'s compiled IL — built against the
+      pre-v2 API shapes (e.g. IDataConsumer's namespace, IOutputDevice.DisplayAsync's signature) —
+      is binary-incompatible with it: TypeLoadException on IDataConsumer, then on
+      Microsoft.Testing.Extensions.Telemetry.AppInsightsProvider.LogEventAsync, then
+      MissingMethodException on IOutputDevice.DisplayAsync, one after another, purely from bumping
+      the Microsoft.Testing.Platform* pins below without also switching the xunit meta-package.
+      testing.md §1 should be updated to say "xunit.v3.mtp-v2" wherever it currently says
+      "xunit.v3" as the package to add.
+    -->
+    <PackageVersion Include="xunit.v3.mtp-v2" Version="3.2.2" />
+    <PackageVersion Include="FsCheck.Xunit.v3" Version="3.3.3" />
+    <PackageVersion Include="Microsoft.Testing.Extensions.CodeCoverage" Version="18.9.0" />
+    <PackageVersion Include="Microsoft.Extensions.TimeProvider.Testing" Version="10.8.0" />
+    <PackageVersion Include="Verify.XunitV3" Version="31.25.0" />
+    <PackageVersion Include="coverlet.MTP" Version="10.0.1" />
+
+    <!--
+      Explicit transitive pins (CentralPackageTransitivePinningEnabled above), now that
+      xunit.v3.mtp-v2 (not plain xunit.v3) is the referenced meta-package: xunit.v3.mtp-v2 3.2.2
+      and Microsoft.Testing.Extensions.CodeCoverage 18.9.0 each independently float
+      Microsoft.Testing.Platform and its MSBuild/Telemetry/TrxReport.Abstractions satellites to
+      slightly different minimums; pinning all four to the same 2.3.2 build closes any remaining
+      skew between them. See https://learn.microsoft.com/dotnet/core/testing/microsoft-testing-platform-migration-from-v1-to-v2
+      for the v1/v2 API-shape differences this guards against.
+    -->
+    <PackageVersion Include="Microsoft.Testing.Platform" Version="2.3.2" />
+    <PackageVersion Include="Microsoft.Testing.Platform.MSBuild" Version="2.3.2" />
+    <PackageVersion Include="Microsoft.Testing.Extensions.Telemetry" Version="2.3.2" />
+    <PackageVersion Include="Microsoft.Testing.Extensions.TrxReport.Abstractions" Version="2.3.2" />
+  </ItemGroup>
+
+</Project>

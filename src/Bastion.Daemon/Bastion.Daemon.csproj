@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>Bastion.Daemon</RootNamespace>
+    <AssemblyName>bastiond</AssemblyName>
+
+    <!-- Composition root / executable — PublishAot, not IsAotCompatible (that's for libraries
+         only; setting it here would have zero effect on publish). DESIGN.md §10, §3.9. -->
+    <PublishAot>true</PublishAot>
+    <InvariantGlobalization>true</InvariantGlobalization>
+
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Bastion.Core\Bastion.Core.csproj" />
+    <ProjectReference Include="..\Bastion.Layout\Bastion.Layout.csproj" />
+    <ProjectReference Include="..\Bastion.Win32\Bastion.Win32.csproj" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" />
+  </ItemGroup>
+
+  <!--
+    VSTHRD* (Microsoft.VisualStudio.Threading.Analyzers) is scoped to Bastion.Win32/Bastion.Daemon
+    only — deliberately NOT a GlobalPackageReference. See docs/engineering/quality-gates.md §6.
+  -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.VisualStudio.Threading.Analyzers" PrivateAssets="all" />
+  </ItemGroup>
+
+</Project>

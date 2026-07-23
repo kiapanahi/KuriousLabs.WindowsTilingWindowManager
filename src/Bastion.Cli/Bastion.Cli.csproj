@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Bastion.Cli</RootNamespace>
+    <AssemblyName>bastionc</AssemblyName>
+
+    <!--
+      Thin IPC client only — named pipes are cross-platform BCL (System.IO.Pipes), and this
+      project touches no Win32-specific API, so it deliberately targets plain net10.0 rather than
+      net10.0-windows (contrast Bastion.Win32/Bastion.Daemon). DESIGN.md §3.9, §10.
+    -->
+    <PublishAot>true</PublishAot>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.CommandLine" />
+  </ItemGroup>
+
+</Project>

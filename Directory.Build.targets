@@ -1,0 +1,20 @@
+<Project>
+
+  <!--
+    Imported late (after the project body) — values here must win regardless of what an
+    individual project set. See docs/engineering/quality-gates.md §2, §5.
+  -->
+
+  <PropertyGroup>
+    <Deterministic>true</Deterministic>
+
+    <!-- RS0030 = BannedApiAnalyzers "symbol is banned" diagnostic; promoted to a build error so
+         a banned API use cannot merge with CI green. -->
+    <WarningsAsErrors>$(WarningsAsErrors);RS0030</WarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <AdditionalFiles Include="$([MSBuild]::GetPathOfFileAbove('BannedSymbols.txt', '$(MSBuildThisFileDirectory)'))" />
+  </ItemGroup>
+
+</Project>

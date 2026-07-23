@@ -1,0 +1,54 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>Bastion.Win32</RootNamespace>
+    <AssemblyName>Bastion.Win32</AssemblyName>
+    <Platforms>x64;arm64</Platforms>
+
+    <!-- Adapter ring — the only project touching HWND, CsWin32, or COM. DESIGN.md §3, §10. -->
+    <IsAotCompatible>true</IsAotCompatible>
+
+    <!--
+      CsWin32 config contract, verbatim per docs/engineering/interop.md §1 — all three of these
+      plus NativeMethods.json's allowMarshaling=false + comInterop.useComSourceGenerators=true
+      are required together to get [GeneratedComInterface]-shaped COM projections rather than
+      COM structs.
+    -->
+    <CsWin32RunAsBuildTask>true</CsWin32RunAsBuildTask>
+    <DisableRuntimeMarshalling>true</DisableRuntimeMarshalling>
+
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <!--
+      RS0030 (BannedApiAnalyzers) fires on CsWin32's generated NativeMethods.g.cs, which uses
+      classic [DllImport] throughout — CsWin32 (pinned 0.3.298) has no setting to emit
+      [LibraryImport] for plain P/Invokes instead (confirmed against its settings.schema.json;
+      the only marshalling-source-generator toggle it exposes, comInterop.useComSourceGenerators,
+      governs COM, not P/Invoke). Scoping the ban via .editorconfig glob to just the generated
+      output does not work in practice (verified empirically: dotnet_diagnostic.RS0030.severity
+      set to "none" under both a `**/Generated/CsWin32/**.cs` and a bare `*.g.cs` section left the
+      error firing unchanged) — matching a currently-open upstream report that the same
+      .editorconfig-scoping approach is "cumbersome" and does not cleanly work
+      (https://github.com/microsoft/CsWin32/issues/1650). This project has zero hand-authored
+      DllImport — the whole P/Invoke surface is CsWin32-generated — so a project-level NoWarn is
+      the correct-scope suppression here, not a workaround-of-convenience; interop.md §2's
+      LibraryImport rule is preserved for every hand-authored P/Invoke everywhere else in the repo.
+    -->
+    <NoWarn>$(NoWarn);RS0030</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Bastion.Core\Bastion.Core.csproj" />
+    <PackageReference Include="Microsoft.Windows.CsWin32" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!--
+    VSTHRD* (Microsoft.VisualStudio.Threading.Analyzers) is scoped to Bastion.Win32/Bastion.Daemon
+    only — deliberately NOT a GlobalPackageReference. See docs/engineering/quality-gates.md §6.
+  -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.VisualStudio.Threading.Analyzers" PrivateAssets="all" />
+  </ItemGroup>
+
+</Project>

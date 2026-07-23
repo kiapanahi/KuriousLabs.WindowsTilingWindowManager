@@ -1,0 +1,103 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = crlf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+
+[*.{cs,csx}]
+indent_size = 4
+
+[*.{json,jsonc,xml,csproj,props,targets,slnx}]
+indent_size = 2
+
+[*.md]
+trim_trailing_whitespace = false
+
+[*.cs]
+
+# File-scoped namespaces are mandatory, not a suggestion.
+csharp_style_namespace_declarations = file_scoped:error
+
+# var only where the type is visually apparent from the RHS — deliberate for the adapter
+# ring, where reading the exact CsWin32-generated type (HWND vs nint vs a raw struct) at
+# the P/Invoke boundary matters more than terseness.
+csharp_style_var_for_built_in_types = true:suggestion
+csharp_style_var_when_type_is_apparent = true:warning
+csharp_style_var_elsewhere = false:warning
+
+# Expression-bodied members: allow where they read cleanly, never mandatory.
+csharp_style_expression_bodied_methods = when_on_single_line:suggestion
+csharp_style_expression_bodied_properties = when_on_single_line:suggestion
+
+# Prefer pattern matching / modern C# idioms as suggestions, not hard errors.
+csharp_style_pattern_matching_over_is_with_cast_check = true:suggestion
+csharp_style_pattern_matching_over_as_with_null_check = true:suggestion
+csharp_style_prefer_switch_expression = true:suggestion
+
+# Required parentheses for clarity around mixed operators.
+dotnet_style_prefer_simplified_boolean_expressions = true:suggestion
+
+# IDE1006 is the ONLY naming severity that has build-time teeth (EnforceCodeStyleInBuild=true
+# makes it fail dotnet build, not just squiggle in the IDE). See quality-gates.md §4.
+dotnet_diagnostic.IDE1006.severity = error
+
+# --- Naming rules: PascalCase types/members, _camelCase private fields ---
+dotnet_naming_style.pascal_case.capitalization = pascal_case
+
+dotnet_naming_style.camel_case_underscore_prefix.capitalization = camel_case
+dotnet_naming_style.camel_case_underscore_prefix.required_prefix = _
+
+dotnet_naming_symbols.types_and_members.applicable_kinds = class, struct, interface, enum, property, method, event, namespace, delegate, type_parameter
+dotnet_naming_symbols.types_and_members.applicable_accessibilities = *
+
+dotnet_naming_symbols.private_fields.applicable_kinds = field
+dotnet_naming_symbols.private_fields.applicable_accessibilities = private, private_protected
+
+dotnet_naming_rule.types_and_members_pascal_case.symbols = types_and_members
+dotnet_naming_rule.types_and_members_pascal_case.style = pascal_case
+dotnet_naming_rule.types_and_members_pascal_case.severity = error
+
+dotnet_naming_rule.private_fields_camel_case.symbols = private_fields
+dotnet_naming_rule.private_fields_camel_case.style = camel_case_underscore_prefix
+dotnet_naming_rule.private_fields_camel_case.severity = error
+
+# private *static* fields use the BCL's own "s_" convention rather than a bare "_" — this also
+# matches .NET runtime style. Note: editorconfig naming-symbol matching can filter on the
+# `static` modifier but not on the [ThreadStatic] *attribute* (there is no such modifier), so a
+# thread-static field cannot be distinguished here and given its own "t_" style; those fields
+# keep the "s_" style from this rule and get a narrowly-scoped `#pragma warning disable IDE1006`
+# at the declaration when the BCL's "t_" convention is wanted for clarity (see e.g.
+# src/Bastion.Win32/WindowProbe.cs).
+dotnet_naming_style.static_camel_case_prefix.capitalization = camel_case
+dotnet_naming_style.static_camel_case_prefix.required_prefix = s_
+
+dotnet_naming_symbols.private_static_fields.applicable_kinds = field
+dotnet_naming_symbols.private_static_fields.applicable_accessibilities = private, private_protected
+dotnet_naming_symbols.private_static_fields.required_modifiers = static
+
+dotnet_naming_rule.private_static_fields_s_prefix.symbols = private_static_fields
+dotnet_naming_rule.private_static_fields_s_prefix.style = static_camel_case_prefix
+dotnet_naming_rule.private_static_fields_s_prefix.severity = error
+
+# `const` fields are implicitly `static`, so the private_static_fields group above (matched on
+# required_modifiers = static) also catches them, forcing e.g. `private const string ClassName`
+# into an "s_"-prefixed camelCase name that reads wrong for a compile-time constant. This is a
+# documented naming-rule gotcha ("Example: const modifier includes static and readonly" in
+# https://learn.microsoft.com/dotnet/fundamentals/code-analysis/style-rules/naming-rules#rule-order)
+# with a documented fix: an explicit intersection rule scoped to `const` takes precedence over the
+# broader `static` rule, so private const fields stay PascalCase like any other constant.
+dotnet_naming_symbols.private_const_fields.applicable_kinds = field
+dotnet_naming_symbols.private_const_fields.applicable_accessibilities = private, private_protected
+dotnet_naming_symbols.private_const_fields.required_modifiers = const
+
+dotnet_naming_rule.private_const_fields_pascal_case.symbols = private_const_fields
+dotnet_naming_rule.private_const_fields_pascal_case.style = pascal_case
+dotnet_naming_rule.private_const_fields_pascal_case.severity = error
+
+# --- CA1045 (avoid ref/out parameters) reconsidered for the P/Invoke-adjacent adapter ring:
+# CsWin32 signatures legitimately use out/ref. Re-enabled only where it's not noise-generating.
+[src/Bastion.Win32/**.cs]
+dotnet_diagnostic.CA1045.severity = none

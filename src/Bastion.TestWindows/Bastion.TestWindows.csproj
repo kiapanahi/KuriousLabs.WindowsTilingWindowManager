@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>Bastion.TestWindows</RootNamespace>
+    <AssemblyName>Bastion.TestWindows</AssemblyName>
+
+    <!--
+      Standalone CreateWindowExW spawner for Tier 3 integration tests (DESIGN.md §11) — never
+      Notepad or any other production app. This is its own small CsWin32 consumer, separate from
+      Bastion.Win32's NativeMethods.txt/json: it needs the window-creation/message-loop surface
+      (RegisterClassEx, CreateWindowEx, GetMessage/DispatchMessage, ...), none of which belongs in
+      the daemon's adapter ring.
+    -->
+    <PublishAot>true</PublishAot>
+    <InvariantGlobalization>true</InvariantGlobalization>
+
+    <CsWin32RunAsBuildTask>true</CsWin32RunAsBuildTask>
+    <DisableRuntimeMarshalling>true</DisableRuntimeMarshalling>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <!-- See src/Bastion.Win32/Bastion.Win32.csproj for the full RS0030-vs-CsWin32 rationale;
+         identical situation here (whole P/Invoke surface is CsWin32-generated [DllImport]). -->
+    <NoWarn>$(NoWarn);RS0030</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Windows.CsWin32" PrivateAssets="all" />
+  </ItemGroup>
+
+</Project>

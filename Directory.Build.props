@@ -1,0 +1,31 @@
+<Project>
+
+  <!--
+    Imported early (before the project body / Sdk.props' own defaults are applied by the SDK
+    targets pipeline) — everything here is an OVERRIDABLE default. A project may still override
+    after its own Sdk.props import. See docs/engineering/quality-gates.md §2.
+
+    TargetFramework is deliberately NOT set here: Bastion.Core/Bastion.Layout target plain
+    net10.0 (Linux-CI-buildable, zero Windows deps per DESIGN.md §3/§10) while
+    Bastion.Win32/Daemon/Cli/TestWindows target net10.0-windows. Each .csproj sets its own.
+  -->
+
+  <PropertyGroup>
+    <LangVersion>14.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+
+    <!-- Pinned compound value — never "latest" (docs/engineering/quality-gates.md §3). -->
+    <AnalysisLevel>10-all</AnalysisLevel>
+    <AnalysisModeSecurity>All</AnalysisModeSecurity>
+    <AnalysisModeReliability>All</AnalysisModeReliability>
+
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <WarningsAsErrors>$(WarningsAsErrors);nullable;NU1901;NU1902;NU1903;NU1904</WarningsAsErrors>
+
+    <!-- NuGetAudit runs in "all" mode (incl. transitive) by default on this SDK; the four IDs
+         above promote known-vulnerable-package advisories from warnings to build failures. -->
+  </PropertyGroup>
+
+</Project>

@@ -1,0 +1,24 @@
+name: Accepted risk / design question
+description: Tracks an accepted risk or undocumented-behavior dependency from DESIGN.md §13 — not a unit of work.
+title: "[Risk]: "
+labels: ["type:risk"]
+body:
+  - type: textarea
+    id: risk
+    attributes:
+      label: The risk / open question
+      description: Quote or closely paraphrase the DESIGN.md §13 entry, or describe a newly-discovered one in the same shape.
+    validations:
+      required: true
+  - type: textarea
+    id: mitigation
+    attributes:
+      label: Current mitigation
+      description: What backstops this today (canary test, non-load-bearing fallback, degradation ladder floor)?
+    validations:
+      required: true
+  - type: textarea
+    id: trigger
+    attributes:
+      label: What would resolve or escalate this
+      description: e.g. "a Tier-5 canary starts failing on a new Windows build", "Microsoft documents the behavior".
