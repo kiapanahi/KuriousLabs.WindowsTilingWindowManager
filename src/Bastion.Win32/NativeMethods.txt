@@ -54,3 +54,10 @@ CoInitializeEx
 CoUninitialize
 PKEY_AppUserModel_ID
 WINDOW_EX_STYLE
+
+// Reconciler heartbeat's per-window authoritative read (DESIGN.md §3.4, issue #4).
+// DWMWA_EXTENDED_FRAME_BOUNDS needs no new entry here: it is already generated as a member of the
+// DWMWINDOWATTRIBUTE enum requested above for the Coalescer's cloak read (issue #2) -- CsWin32
+// generates every member of a requested enum type, not just the ones referenced so far.
+IsIconic
+IsZoomed

@@ -8,8 +8,22 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Bastion.Core\Bastion.Core.csproj" />
+
+    <!--
+      Only for ReconcilerDepthCapTests' real DwindleLayoutEngine (its own SplitTree/SplitTreeLayout
+      recursion is the thing under test there); every other Reconciler test uses a local
+      FakeLayoutEngine so it is not coupled to dwindle's specific split arithmetic. Not circular:
+      Bastion.Layout already references Bastion.Core (for WindowId, per that project's own
+      csproj), so this is Bastion.Core.Tests depending on both ends of an existing one-directional
+      edge, not a new cycle.
+    -->
+    <ProjectReference Include="..\..\src\Bastion.Layout\Bastion.Layout.csproj" />
+
     <PackageReference Include="xunit.v3.mtp-v2" />
     <PackageReference Include="Microsoft.Testing.Extensions.CodeCoverage" />
+
+    <!-- FakeTimeProvider for deterministic Reconciler heartbeat/reassert-budget tests (testing.md §4). -->
+    <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" />
   </ItemGroup>
 
 </Project>
