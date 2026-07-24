@@ -54,6 +54,23 @@ namespace Bastion.Core;
 /// <see cref="DesiredWorkspace"/>'s remarks for why this type reuses <see cref="ILayoutEngine"/>
 /// rather than holding/walking a persisted tree itself.
 /// </para>
+/// <para>
+/// <b>Placement-plan hand-off (GitHub issue #10's composition-root wiring).</b>
+/// <see cref="PlacementPlanReader"/> publishes every non-empty plan <see cref="ConvergeOnceAsync"/>
+/// produces — whichever of the three convergence triggers caused it — so a Win32-side consumer
+/// (<c>Bastion.Win32</c>'s placement-execution pump) can drain it and hand each plan to the
+/// Placement Executor, exactly the same "expose a <see cref="ChannelReader{T}"/>, let an adapter-ring
+/// pump drain it" shape <c>WinEventPumpService.IngestReader</c>/<c>Coalescer.IntentReader</c> already
+/// establish for the two upstream hops of this same pipeline. This keeps <see cref="RunAsync"/> the
+/// single production entry point for convergence timing (heartbeat + wake, already covered by this
+/// type's own tests) while still letting <see cref="ConvergeOnceAsync"/>'s result reach the executor
+/// without inventing a second, duplicate heartbeat/wake loop outside this class. Only <em>non-empty</em>
+/// plans are published — an empty plan means nothing to execute, matching how the upstream channels
+/// only ever carry meaningful payloads. A plan not yet drained when a fresher one arrives is
+/// superseded, never queued behind it (<see cref="BoundedChannelFullMode.DropOldest"/>): the newest
+/// convergence result always supersedes an older, not-yet-applied one, the same "reads are truth"
+/// reasoning DESIGN.md §1 already applies everywhere else in this pipeline.
+/// </para>
 /// </remarks>
 public sealed class Reconciler : IDisposable
 {
@@ -69,11 +86,24 @@ public sealed class Reconciler : IDisposable
         AllowSynchronousContinuations = false,
     };
 
+    private static readonly BoundedChannelOptions s_placementPlanChannelOptions = new(capacity: 1)
+    {
+        // The inverse choice from s_wakeChannelOptions, deliberately: here the *newest* plan must
+        // win over a stale one still sitting unread, not the other way around -- see this type's
+        // own remarks ("Placement-plan hand-off") for why.
+        FullMode = BoundedChannelFullMode.DropOldest,
+        SingleReader = true,
+        SingleWriter = true, // only ConvergeOnceAsync ever writes, serialized by _convergenceGate
+        AllowSynchronousContinuations = false,
+    };
+
     private readonly IWindowSystem _windowSystem;
     private readonly ILayoutEngine _layoutEngine;
     private readonly TimeProvider _timeProvider;
     private readonly ReconcilerOptions _options;
     private readonly Channel<byte> _wakeChannel = Channel.CreateBounded<byte>(s_wakeChannelOptions);
+    private readonly Channel<ImmutableArray<PlacementInstruction>> _placementPlanChannel =
+        Channel.CreateBounded<ImmutableArray<PlacementInstruction>>(s_placementPlanChannelOptions);
     private readonly SemaphoreSlim _convergenceGate = new(1, 1);
 
     // Guards every read-modify-write of DesiredState (and the reassert-budget dictionary, which is
@@ -147,6 +177,17 @@ public sealed class Reconciler : IDisposable
 
     /// <summary>The placement plan the most recent convergence pass produced (GitHub issue #4's deliverable; issue #5 executes it).</summary>
     public ImmutableArray<PlacementInstruction> LastPlacementPlan { get; private set; }
+
+    /// <summary>
+    /// The consuming side of the placement-plan hand-off channel (GitHub issue #10). Every
+    /// <em>non-empty</em> plan <see cref="ConvergeOnceAsync"/> produces — regardless of which of the
+    /// three convergence triggers caused it — is published here for a Win32-side placement-execution
+    /// pump to drain and apply. Same "expose a <see cref="ChannelReader{T}"/>" shape as
+    /// <c>WinEventPumpService.IngestReader</c>/<c>Coalescer.IntentReader</c>; see this type's own
+    /// remarks ("Placement-plan hand-off") for why this is a channel rather than a change to
+    /// <see cref="RunAsync"/>'s own signature.
+    /// </summary>
+    public ChannelReader<ImmutableArray<PlacementInstruction>> PlacementPlanReader => _placementPlanChannel.Reader;
 
     /// <summary>
     /// Registers or replaces the workspace at <paramref name="key"/>, seeding its work
@@ -281,6 +322,16 @@ public sealed class Reconciler : IDisposable
                 LastPlacementPlan = plan;
             }
 
+            if (!plan.IsEmpty)
+            {
+                // See this type's remarks ("Placement-plan hand-off"): only non-empty plans are
+                // published -- an empty plan means nothing for the executor to do. TryWrite never
+                // blocks/waits (s_placementPlanChannelOptions.FullMode is DropOldest, not Wait), so
+                // this can never stall a convergence pass even if nothing has drained the previous
+                // plan yet.
+                _ = _placementPlanChannel.Writer.TryWrite(plan);
+            }
+
             return plan;
         }
         finally
@@ -338,6 +389,7 @@ public sealed class Reconciler : IDisposable
 
         _disposed = true;
         _wakeChannel.Writer.TryComplete();
+        _placementPlanChannel.Writer.TryComplete();
         _convergenceGate.Dispose();
     }
 

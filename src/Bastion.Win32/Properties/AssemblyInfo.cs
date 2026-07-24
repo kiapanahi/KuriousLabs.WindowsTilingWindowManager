@@ -18,3 +18,12 @@ using System.Runtime.CompilerServices;
 // assembly name (Bastion.Cli.csproj's own <AssemblyName>bastionc</AssemblyName>), not the project
 // or folder name; using the project name here would silently fail to grant access.
 [assembly: InternalsVisibleTo("bastionc")]
+
+// GitHub issue #10: bastiond's composition root (Bastion.Daemon's Program.cs and its
+// registration-extension helpers) is this assembly's second production consumer, extending the
+// identical "internal types, InternalsVisibleTo per production consumer" shape the bastionc grant
+// above already establishes -- every hosted service and adapter in this assembly (WinEventPumpService,
+// Coalescer, WindowRegistry, PlacementExecutor, the HWND journal chain, etc.) stays `internal`, and
+// only Bastion.Daemon.csproj's own ProjectReference + this attribute grant it access. "bastiond", not
+// "Bastion.Daemon" -- matches Bastion.Daemon.csproj's own <AssemblyName>bastiond</AssemblyName>.
+[assembly: InternalsVisibleTo("bastiond")]
