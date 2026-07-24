@@ -24,5 +24,20 @@ internal sealed class FakeConfigDirectoryWatcher : IConfigDirectoryWatcher
     /// <summary>Simulates a filesystem change notification firing.</summary>
     public void RaiseChanged() => Changed?.Invoke(this, EventArgs.Empty);
 
+    /// <summary>
+    /// Snapshots the current <see cref="Changed"/> delegate for a later, possibly-stale invocation —
+    /// simulating the real <see cref="FileSystemWatcher"/>'s in-flight-callback race
+    /// <c>WindowRulesHotReloadService</c>'s remarks describe: a real event's multicast delegate
+    /// field is read once when dispatch begins, so a subscriber removed via <c>-=</c> afterward
+    /// does not retroactively affect an invocation already under way on that already-fetched
+    /// delegate instance. <see cref="RaiseChanged"/> alone cannot reproduce this — invoking
+    /// <see cref="Changed"/> *after* a test has unsubscribed a handler will simply skip it, because
+    /// the field is re-read at that later invocation, not snapshotted earlier. Capturing the
+    /// delegate here, then invoking it after <c>StopAsync</c>/<c>Dispose</c> has already
+    /// unsubscribed and stopped, reproduces the actual ordering a real
+    /// <see cref="FileSystemWatcher"/> callback dispatched to a thread-pool thread can hit.
+    /// </summary>
+    public EventHandler? CaptureCurrentChangedHandler() => Changed;
+
     public void Dispose() => IsDisposed = true;
 }

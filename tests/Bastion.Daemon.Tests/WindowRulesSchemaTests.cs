@@ -55,6 +55,26 @@ public sealed class WindowRulesSchemaTests
     }
 
     [Fact]
+    public void BuildSchemaEncodesANonEmptyValueConstraintOnEachIndividualMatchProperty()
+    {
+        // Regression test for a review finding: WindowRuleMatch.IsEmpty treats an empty string
+        // exactly like an absent/null field (string.IsNullOrEmpty), but the anyOf/required idiom
+        // asserted by BuildSchemaEncodesTheAtLeastOneMatchCriterionConstraint only checks *presence*
+        // of a property key -- so without this, an editor validating against the schema would still
+        // accept e.g. { "className": "" }, which ValidateRules then rejects identically to omitting
+        // className altogether.
+        JsonNode schema = WindowRulesSchemaWriter.BuildSchema();
+        JsonNode? matchProperties = schema["properties"]?["rules"]?["items"]?["properties"]?["match"]?["properties"];
+
+        Assert.NotNull(matchProperties);
+        string[] matchFieldNames = ["appUserModelId", "executablePath", "className"];
+        foreach (string fieldName in matchFieldNames)
+        {
+            Assert.Equal(1, (int?)matchProperties[fieldName]?["minLength"]);
+        }
+    }
+
+    [Fact]
     public async Task WriteAsyncWritesAParsableSchemaFileToTheGivenPath()
     {
         string tempDirectory = Directory.CreateTempSubdirectory("bastion-schema-tests-").FullName;

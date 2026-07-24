@@ -51,9 +51,28 @@ namespace Bastion.Daemon;
 /// <see cref="JsonSchemaExporterContext.TypeInfo"/> identifying which CLR type's schema node is
 /// currently being visited.
 /// </para>
+/// <para>
+/// <b>Each individual match property also gets its own <c>"minLength": 1</c></b> (caught in review):
+/// <see cref="WindowRuleMatch.IsEmpty"/> treats an empty string exactly like an absent/null field
+/// (<see cref="string.IsNullOrEmpty(string?)"/>), but <c>anyOf</c>/<c>required</c> alone only checks
+/// *presence* of a property key, not whether its value is non-empty — so without this, a rule like
+/// <c>{ "match": { "className": "" } }</c> would still pass schema validation while
+/// <see cref="WindowRulesDocument.ValidateRules"/> rejects it identically to omitting
+/// <c>className</c> altogether. This closes that gap for the empty-string case specifically; a
+/// deliberately-written <c>{ "className": null }</c> alone remains a narrower, unclosed edge case —
+/// JSON Schema's <c>minLength</c> is a no-op against an explicit <see langword="null"/> value, and
+/// writing that out by hand is a far less likely authoring mistake than leaving a value blank.
+/// </para>
 /// </remarks>
 internal static class WindowRulesSchemaWriter
 {
+    /// <summary>
+    /// <see cref="WindowRuleMatch"/>'s three field names in wire (camelCase) casing — shared between
+    /// the "at least one present" (<c>anyOf</c>/<c>required</c>) and "non-empty when present"
+    /// (<c>minLength</c>) constraints <see cref="TransformSchemaNode"/> adds to the match schema.
+    /// </summary>
+    private static readonly string[] s_matchFieldNames = ["appUserModelId", "executablePath", "className"];
+
     private static readonly JsonSchemaExporterOptions s_exporterOptions = new()
     {
         TreatNullObliviousAsNonNullable = true,
@@ -84,9 +103,23 @@ internal static class WindowRulesSchemaWriter
             // criteria at all. JSON Schema has no direct "at least one of these properties is
             // present" keyword; the standard idiom is anyOf-of-required.
             matchSchema["anyOf"] = new JsonArray(
-                new JsonObject { ["required"] = new JsonArray("appUserModelId") },
-                new JsonObject { ["required"] = new JsonArray("executablePath") },
-                new JsonObject { ["required"] = new JsonArray("className") });
+                new JsonObject { ["required"] = new JsonArray(s_matchFieldNames[0]) },
+                new JsonObject { ["required"] = new JsonArray(s_matchFieldNames[1]) },
+                new JsonObject { ["required"] = new JsonArray(s_matchFieldNames[2]) });
+
+            // See this type's remarks: anyOf/required alone only checks property *presence*, so an
+            // empty string per field also needs its own minLength to match ValidateRules' actual
+            // (IsNullOrEmpty-based) notion of "unset."
+            if (matchSchema["properties"] is JsonObject matchProperties)
+            {
+                foreach (string fieldName in s_matchFieldNames)
+                {
+                    if (matchProperties[fieldName] is JsonObject fieldSchema)
+                    {
+                        fieldSchema["minLength"] = 1;
+                    }
+                }
+            }
         }
 
         return schema;

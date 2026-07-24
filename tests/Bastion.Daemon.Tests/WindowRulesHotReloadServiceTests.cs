@@ -172,10 +172,44 @@ public sealed class WindowRulesHotReloadServiceTests : IDisposable
         Assert.Equal(0, _notifier.SucceededCallCount);
     }
 
-    private WindowRulesHotReloadService CreateService(System.Collections.Immutable.ImmutableArray<WindowRule> rules) =>
-        CreateService(CreatePublished(rules));
+    [Fact]
+    public async Task OnDirectoryChangedInvokedAfterStopAsyncDoesNotCreateANewDebounceTimer()
+    {
+        // Regression test for a review finding: StopAsync/Dispose's "-=" unsubscription cannot
+        // retract an invocation of OnDirectoryChanged already dispatched to a thread-pool thread
+        // before the unsubscription took effect -- a real FileSystemWatcher's own event-dispatch
+        // race, reproduced here via FakeConfigDirectoryWatcher.CaptureCurrentChangedHandler (see
+        // its remarks for why RaiseChanged alone cannot simulate this). Without the _stopped check
+        // this fix added, such a late-arriving call would still create a brand-new ITimer that
+        // nothing then disposes, even though OnDebounceElapsed's own _stopped check already
+        // prevented it from ever publishing -- asserting TimersCreated stays at 0 proves the timer
+        // itself is never (re)created once stopped, which a purely behavioral "no notification
+        // fired" assertion (as in StopAsyncStopsTheWatcherAndFurtherChangesAreIgnored) cannot
+        // distinguish from "a timer was created and then correctly no-opped."
+        await WriteShippedRuleAsync("a", WindowRuleAction.Ignore);
+        var countingTime = new TimerCreationCountingTimeProvider(_time);
+        using WindowRulesHotReloadService service = CreateService(CreatePublished(initialRules: []), countingTime);
+        await service.StartAsync(TestContext.Current.CancellationToken);
 
-    private WindowRulesHotReloadService CreateService(PublishedWindowRulesConfig published)
+        // Captured while still subscribed, mirroring a real FileSystemWatcher callback that has
+        // already been dispatched to a thread-pool thread before StopAsync's "-=" runs.
+        EventHandler? staleHandler = _watcher.CaptureCurrentChangedHandler();
+
+        await service.StopAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(0, countingTime.TimersCreated);
+
+        staleHandler?.Invoke(_watcher, EventArgs.Empty);
+
+        Assert.Equal(0, countingTime.TimersCreated);
+    }
+
+    private WindowRulesHotReloadService CreateService(System.Collections.Immutable.ImmutableArray<WindowRule> rules) =>
+        CreateService(CreatePublished(rules), _time);
+
+    private WindowRulesHotReloadService CreateService(PublishedWindowRulesConfig published) =>
+        CreateService(published, _time);
+
+    private WindowRulesHotReloadService CreateService(PublishedWindowRulesConfig published, TimeProvider timeProvider)
     {
         var paths = new WindowRulesConfigPaths
         {
@@ -185,7 +219,7 @@ public sealed class WindowRulesHotReloadServiceTests : IDisposable
             SchemaFilePath = Path.Combine(_tempDirectory, "rules.schema.json"),
         };
         var loader = new WindowRulesConfigLoader(paths);
-        return new WindowRulesHotReloadService(_watcher, loader, published, _notifier, _time, s_debounce);
+        return new WindowRulesHotReloadService(_watcher, loader, published, _notifier, timeProvider, s_debounce);
     }
 
     private static PublishedWindowRulesConfig CreatePublished(System.Collections.Immutable.ImmutableArray<WindowRule> initialRules)

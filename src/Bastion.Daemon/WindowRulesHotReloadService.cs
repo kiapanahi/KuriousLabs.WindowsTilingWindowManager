@@ -80,6 +80,23 @@ namespace Bastion.Daemon;
 /// redundant, wasted <c>LoadMerged</c> work during a genuine overlap for correctness, rather than
 /// adding real cancellation for what is, in practice, a small, synchronous, infrequent file read.
 /// </para>
+/// <para>
+/// <b><see cref="OnDirectoryChanged"/> itself also checks <see cref="_stopped"/>, not only
+/// <see cref="OnDebounceElapsed"/></b> (caught in review): the same in-flight-callback race this
+/// type's remarks already describe for the debounce callback applies equally to the
+/// <see cref="IConfigDirectoryWatcher.Changed"/> handler itself — <see cref="StopAsync"/>/
+/// <see cref="Dispose"/>'s <c>-=</c> unsubscription cannot retract an invocation already dispatched
+/// to a thread-pool thread. Without this check, such a late invocation could see a
+/// <see langword="null"/> <see cref="_debounceTimer"/> (already disposed and nulled by
+/// <see cref="StopAsync"/>/<see cref="Dispose"/>) and create a brand new <see cref="ITimer"/> that
+/// nothing then disposes — <see cref="OnDebounceElapsed"/>'s own <see cref="_stopped"/> check would
+/// still prevent it from ever publishing, but the orphaned timer should never be created once
+/// shutdown has started. Checked inside the same <see cref="_gate"/> lock <see cref="StopAsync"/>/
+/// <see cref="Dispose"/> set <see cref="_stopped"/> under, so the two orderings race-free: either
+/// this handler observes <see langword="false"/> and arms a timer that the still-in-progress
+/// <see cref="StopAsync"/>/<see cref="Dispose"/> call will go on to dispose, or it observes
+/// <see langword="true"/> (already set) and never creates one at all.
+/// </para>
 /// </remarks>
 [SuppressMessage(
     "Performance",
@@ -161,6 +178,21 @@ internal sealed class WindowRulesHotReloadService : IHostedService, IDisposable
     {
         lock (_gate)
         {
+            // Guards against the same timer-outlives-dispose race this type's remarks describe,
+            // but for timer *creation* rather than the load/publish already checked in
+            // OnDebounceElapsed (caught in review): StopAsync/Dispose's "-=" unsubscription cannot
+            // retract an invocation of this very handler already dispatched to a thread-pool
+            // thread before the unsubscription took effect, so this callback can still run after
+            // _stopped is set. Without this check, that in-flight call would see a null
+            // _debounceTimer (StopAsync/Dispose already disposed and nulled it) and create a brand
+            // new ITimer that nothing then disposes -- OnDebounceElapsed's own _stopped check would
+            // still prevent it from ever publishing, but the orphaned timer itself should never be
+            // created once shutdown has started.
+            if (_stopped)
+            {
+                return;
+            }
+
             _generation++;
             if (_debounceTimer is null)
             {

@@ -17,19 +17,22 @@
                 type: [
                   string,
                   null
-                ]
+                ],
+                minLength: 1
               },
               executablePath: {
                 type: [
                   string,
                   null
-                ]
+                ],
+                minLength: 1
               },
               className: {
                 type: [
                   string,
                   null
-                ]
+                ],
+                minLength: 1
               }
             },
             anyOf: [
