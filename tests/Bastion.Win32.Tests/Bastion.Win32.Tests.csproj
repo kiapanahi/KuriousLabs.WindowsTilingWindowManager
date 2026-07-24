@@ -1,7 +1,10 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net10.0-windows</TargetFramework>
+    <!-- Matches Bastion.Win32.csproj's own TFM (GitHub issue #6) — a project referencing
+         Bastion.Win32 cannot target a lower TargetPlatformVersion than it does (NU1201); see that
+         project's comment for the full GetSystemMetricsForDpi/GetDpiForSystem rationale. -->
+    <TargetFramework>net10.0-windows10.0.17763.0</TargetFramework>
     <RootNamespace>Bastion.Win32.Tests</RootNamespace>
     <AssemblyName>Bastion.Win32.Tests</AssemblyName>
     <Platforms>x64;arm64</Platforms>

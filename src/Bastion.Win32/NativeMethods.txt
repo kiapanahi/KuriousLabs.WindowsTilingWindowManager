@@ -79,3 +79,14 @@ SET_WINDOW_POS_FLAGS
 SystemParametersInfoW
 SYSTEM_PARAMETERS_INFO_ACTION
 WIN32_ERROR
+
+// Effective-min-size cache seed (DESIGN.md §6, issue #6): GetSystemMetricsForDpi, never the
+// non-DPI-aware GetSystemMetrics, per that API's own documented "should not be used if the
+// calling thread is per-monitor DPI aware" guidance -- Bastion's PerMonitorV2 manifest (DESIGN.md
+// §8) makes every Bastion thread per-monitor DPI aware. SYSTEM_METRICS_INDEX is listed explicitly
+// (mirroring the DWMWINDOWATTRIBUTE precedent above) even though CsWin32 would generate it as
+// GetSystemMetricsForDpi's parameter type regardless, so SM_CXMINTRACK/SM_CYMINTRACK are
+// discoverable from this file without cross-referencing the generated output.
+GetSystemMetricsForDpi
+GetDpiForSystem
+SYSTEM_METRICS_INDEX
