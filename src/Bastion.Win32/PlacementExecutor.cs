@@ -43,11 +43,19 @@ namespace Bastion.Win32;
 /// <c>WindowId</c>, quarantine, or the synchronous batch pays no delay at all.
 /// </para>
 /// <para>
-/// <b>Not thread-safe; expects sequential invocation.</b> Matches the single-threaded-actor
-/// architecture the whole pipeline assumes upstream (DESIGN.md §3, §3.4's <see cref="Reconciler"/>
-/// remarks) — exactly one plan is being applied at a time in production. <see cref="_quarantine"/>'s
-/// dictionary is not guarded by a lock; a future caller that ever needs concurrent
-/// <see cref="ApplyAsync"/> calls must serialize them itself.
+/// <b><see cref="ApplyAsync"/> itself is not thread-safe; expects sequential invocation.</b> Matches
+/// the single-threaded-actor architecture the whole pipeline assumes upstream (DESIGN.md §3, §3.4's
+/// <see cref="Reconciler"/> remarks) — exactly one plan is being applied at a time in production
+/// (<c>Bastion.Win32.PlacementExecutionPump</c>'s own single sequential drain loop). <see cref="_quarantine"/>'s
+/// <em>dictionary</em> is a narrower exception, guarded by <see cref="_quarantineLock"/> (GitHub
+/// issue #10, Codex review finding on this PR): <see cref="Purge"/> is a genuine second concurrent
+/// entry point — <c>Bastion.Win32.ReconcilerIntentPump</c>'s own independent drain loop calls it on
+/// <c>WindowVanished</c>, which can run concurrently with an in-flight <see cref="ApplyAsync"/> pass
+/// on a different thread. The lock covers only the dictionary's own structural mutations
+/// (<see cref="GetOrCreateQuarantine"/>'s lookup-or-insert, <see cref="Purge"/>'s remove) — never a
+/// <see cref="QuarantineState"/> instance's own field mutations
+/// (<see cref="QuarantineState.RecordHang"/>/<see cref="QuarantineState.RecordResponsive"/>), which
+/// stay reachable only from <see cref="ApplyAsync"/>'s own still-single-caller-at-a-time path.
 /// </para>
 /// <para>
 /// <b>Hang quarantine has two independent parts.</b> A <em>transient</em> backoff
@@ -107,6 +115,12 @@ internal sealed class PlacementExecutor
     private readonly TimeProvider _timeProvider;
     private readonly PlacementExecutorOptions _options;
     private readonly Dictionary<WindowId, QuarantineState> _quarantine = [];
+
+    // Guards only _quarantine's own structural mutations (lookup-or-insert, remove) -- see this
+    // type's own remarks for why Purge becoming a genuine second concurrent caller (GitHub issue
+    // #10) needs this despite ApplyAsync's own still-single-caller-at-a-time contract. Never held
+    // across an await -- every access below is a synchronous dictionary operation.
+    private readonly Lock _quarantineLock = new();
 
     public PlacementExecutor(
         IPlacementSystem system,
@@ -332,23 +346,33 @@ internal sealed class PlacementExecutor
 
     /// <summary>
     /// Drops <paramref name="windowId"/>'s quarantine bookkeeping (both the transient backoff and
-    /// the sticky ever-hung flag). Not yet wired to anything — a future caller (GitHub issue #10)
-    /// pairs this with the same <c>WindowVanished</c> signal <see cref="ReconcilerIntentPump"/>
-    /// already reacts to, so a long-lived daemon's per-window dictionary here does not grow
-    /// unbounded across the churn of windows opening and closing (mirroring
-    /// <c>Reconciler.PruneReassertBudgets</c>'s own rationale).
+    /// the sticky ever-hung flag). Wired by GitHub issue #10's <see cref="ReconcilerIntentPump"/> to
+    /// the same <c>WindowVanished</c> signal that already purges <c>WindowRegistry</c>, so a
+    /// long-lived daemon's per-window dictionary here does not grow unbounded across the churn of
+    /// windows opening and closing (mirroring <c>Reconciler.PruneReassertBudgets</c>'s own
+    /// rationale). Safe to call concurrently with an in-flight <see cref="ApplyAsync"/> pass on a
+    /// different thread — see <see cref="_quarantineLock"/>'s own remarks.
     /// </summary>
-    public void Purge(WindowId windowId) => _quarantine.Remove(windowId);
+    public void Purge(WindowId windowId)
+    {
+        lock (_quarantineLock)
+        {
+            _quarantine.Remove(windowId);
+        }
+    }
 
     private QuarantineState GetOrCreateQuarantine(WindowId windowId)
     {
-        if (!_quarantine.TryGetValue(windowId, out QuarantineState? state))
+        lock (_quarantineLock)
         {
-            state = new QuarantineState();
-            _quarantine[windowId] = state;
-        }
+            if (!_quarantine.TryGetValue(windowId, out QuarantineState? state))
+            {
+                state = new QuarantineState();
+                _quarantine[windowId] = state;
+            }
 
-        return state;
+            return state;
+        }
     }
 
     /// <summary>
