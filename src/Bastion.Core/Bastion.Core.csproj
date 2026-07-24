@@ -9,4 +9,19 @@
     <IsAotCompatible>true</IsAotCompatible>
   </PropertyGroup>
 
+  <!--
+    No ProjectReference to Bastion.Layout here, and none should ever be added: Bastion.Layout
+    already references Bastion.Core (for WindowId), so the reverse reference is a circular
+    dependency MSBuild rejects outright (confirmed empirically while implementing GitHub issue #4).
+    The Reconciler (issue #4) needs Rect, LayoutConstraints, LayoutGaps, WindowPlacement, and
+    ILayoutEngine, all pure and Win32-free and previously homed in Bastion.Layout, so those five
+    types moved into this project instead: they are the layout-engine contract Bastion.Core's
+    Reconciler consumes, and Bastion.Layout now depends on Bastion.Core for them (unchanged
+    reference direction) rather than the other way around. Bastion.Layout supplies implementations
+    of that contract (DwindleLayoutEngine today; master-stack/monocle/manual-split-tree later,
+    DESIGN.md §12), which is the correct dependency direction for a plugin-shaped abstraction
+    (DESIGN.md §3.9) regardless of the circular-reference constraint that forced discovering it
+    here.
+  -->
+
 </Project>
