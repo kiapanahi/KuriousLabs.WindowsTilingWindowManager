@@ -63,6 +63,23 @@ namespace Bastion.Daemon;
 /// notification — matching <c>Bastion.Win32.Coalescer.FlushLocked</c>'s identical
 /// re-check-after-reacquiring-the-lock pattern for the same class of timer-outlives-dispose race.
 /// </para>
+/// <para>
+/// <b>A monotonically increasing <see cref="_generation"/> discards a superseded reload attempt
+/// rather than letting it publish out of order</b> (caught in review): the debounce timer is
+/// (re)armed on <see cref="_debounceTimer"/>, a single instance, without cancelling whatever
+/// callback invocation the *previous* arming may already be executing — if a second
+/// <see cref="IConfigDirectoryWatcher.Changed"/> arrives while an earlier
+/// <see cref="OnDebounceElapsed"/> call is still mid-<see cref="WindowRulesConfigLoader.LoadMerged"/>,
+/// both invocations can end up racing to publish, and the earlier (but slower) one finishing last
+/// would otherwise overwrite the later, more current snapshot with stale data. Every
+/// <see cref="OnDirectoryChanged"/> increments <see cref="_generation"/> and every
+/// <see cref="OnDebounceElapsed"/> invocation captures it *before* loading and re-checks it
+/// atomically with the publish (alongside <see cref="_stopped"/>) — a mismatch means a newer change
+/// has arrived since this attempt started, so its result is silently discarded (no notification
+/// either way) in favor of whatever the newer attempt reports. This trades a small amount of
+/// redundant, wasted <c>LoadMerged</c> work during a genuine overlap for correctness, rather than
+/// adding real cancellation for what is, in practice, a small, synchronous, infrequent file read.
+/// </para>
 /// </remarks>
 [SuppressMessage(
     "Performance",
@@ -87,6 +104,7 @@ internal sealed class WindowRulesHotReloadService : IHostedService, IDisposable
     private readonly TimerCallback _onDebounceElapsed;
     private ITimer? _debounceTimer;
     private bool _stopped;
+    private long _generation;
 
     public WindowRulesHotReloadService(
         IConfigDirectoryWatcher watcher,
@@ -143,6 +161,7 @@ internal sealed class WindowRulesHotReloadService : IHostedService, IDisposable
     {
         lock (_gate)
         {
+            _generation++;
             if (_debounceTimer is null)
             {
                 _debounceTimer = _timeProvider.CreateTimer(_onDebounceElapsed, null, _debounce, Timeout.InfiniteTimeSpan);
@@ -156,12 +175,15 @@ internal sealed class WindowRulesHotReloadService : IHostedService, IDisposable
 
     private void OnDebounceElapsed(object? state)
     {
+        long myGeneration;
         lock (_gate)
         {
             if (_stopped)
             {
                 return;
             }
+
+            myGeneration = _generation;
         }
 
         try
@@ -173,8 +195,10 @@ internal sealed class WindowRulesHotReloadService : IHostedService, IDisposable
                 // Re-checked here, atomically with the publish itself: StopAsync may have run
                 // (and disposed the timer) between the check above and this possibly-slow file
                 // read completing -- see this type's remarks for the timer-outlives-dispose race
-                // this guards against.
-                if (_stopped)
+                // this guards against. A generation mismatch means a newer change arrived and is
+                // (or will be) handled by its own OnDebounceElapsed invocation -- discard this
+                // now-stale result rather than risk publishing it after a newer one already ran.
+                if (_stopped || _generation != myGeneration)
                 {
                     return;
                 }

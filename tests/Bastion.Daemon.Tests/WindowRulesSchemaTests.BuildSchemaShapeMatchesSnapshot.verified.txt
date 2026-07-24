@@ -7,7 +7,8 @@
         type: object,
         properties: {
           name: {
-            type: string
+            type: string,
+            minLength: 1
           },
           match: {
             type: object,
@@ -30,7 +31,24 @@
                   null
                 ]
               }
-            }
+            },
+            anyOf: [
+              {
+                required: [
+                  appUserModelId
+                ]
+              },
+              {
+                required: [
+                  executablePath
+                ]
+              },
+              {
+                required: [
+                  className
+                ]
+              }
+            ]
           },
           action: {
             enum: [

@@ -38,13 +38,59 @@ namespace Bastion.Daemon;
 /// <c>rules.jsonc</c>), not part of the config-gating contract itself — <see cref="WriteAsync"/>'s
 /// caller (<see cref="WindowRulesSchemaPublisherService"/>) catches and logs rather than propagates.
 /// </para>
+/// <para>
+/// <b><see cref="TransformSchemaNode"/> encodes the two business rules
+/// <see cref="WindowRulesDocument.ValidateRules"/> enforces that the exporter's own DTO-shape
+/// reflection cannot express</b> (caught in review): without it, the published schema alone would
+/// accept an empty/whitespace-only <see cref="WindowRule.Name"/> or a <see cref="WindowRuleMatch"/>
+/// with no criteria at all — both syntactically valid per the DTO shape, both rejected by the actual
+/// loader — so a user's editor would silently green-light input the daemon then fails to start (or
+/// hot-reload) with. The transform adds a <c>"minLength": 1</c> constraint to <c>name</c> and an
+/// <c>"anyOf"</c>/<c>"required"</c> constraint (the standard JSON Schema idiom for "at least one of
+/// these properties must be present") to the match object, keyed off
+/// <see cref="JsonSchemaExporterContext.TypeInfo"/> identifying which CLR type's schema node is
+/// currently being visited.
+/// </para>
 /// </remarks>
 internal static class WindowRulesSchemaWriter
 {
-    private static readonly JsonSchemaExporterOptions s_exporterOptions = new() { TreatNullObliviousAsNonNullable = true };
+    private static readonly JsonSchemaExporterOptions s_exporterOptions = new()
+    {
+        TreatNullObliviousAsNonNullable = true,
+        TransformSchemaNode = TransformSchemaNode,
+    };
 
     /// <summary>Builds the schema <see cref="JsonNode"/> for <see cref="WindowRulesDocument"/>. Pure with respect to the filesystem — no I/O.</summary>
     public static JsonNode BuildSchema() => ConfigJsonContext.Default.WindowRulesDocument.GetJsonSchemaAsNode(s_exporterOptions);
+
+    /// <summary>See this type's remarks for why this transform exists and what it encodes.</summary>
+    private static JsonNode TransformSchemaNode(JsonSchemaExporterContext context, JsonNode schema)
+    {
+        if (context.TypeInfo.Type == typeof(WindowRule)
+            && schema is JsonObject ruleSchema
+            && ruleSchema["properties"] is JsonObject ruleProperties
+            && ruleProperties["name"] is JsonObject nameSchema)
+        {
+            // WindowRule.Name: [Required]'s AllowEmptyStrings=false rejects null/""/whitespace-only
+            // (WindowRulesOptionsValidator) and WindowRulesDocument.ValidateRules re-enforces the
+            // same rule for hot-reload. minLength alone can't express "not whitespace-only," but it
+            // at least closes the most common gap (an empty string) the bare DTO shape misses.
+            nameSchema["minLength"] = 1;
+        }
+
+        if (context.TypeInfo.Type == typeof(WindowRuleMatch) && schema is JsonObject matchSchema)
+        {
+            // WindowRuleMatch: WindowRulesDocument.ValidateRules rejects a rule whose Match has no
+            // criteria at all. JSON Schema has no direct "at least one of these properties is
+            // present" keyword; the standard idiom is anyOf-of-required.
+            matchSchema["anyOf"] = new JsonArray(
+                new JsonObject { ["required"] = new JsonArray("appUserModelId") },
+                new JsonObject { ["required"] = new JsonArray("executablePath") },
+                new JsonObject { ["required"] = new JsonArray("className") });
+        }
+
+        return schema;
+    }
 
     /// <summary>
     /// Serializes <see cref="BuildSchema"/>'s result and durably writes it to

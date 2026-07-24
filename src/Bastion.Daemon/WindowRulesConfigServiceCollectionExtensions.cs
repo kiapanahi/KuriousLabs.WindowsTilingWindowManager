@@ -43,8 +43,11 @@ internal static class WindowRulesConfigServiceCollectionExtensions
         services.TryAddSingleton(TimeProvider.System);
         services.TryAddSingleton<WindowRulesConfigLoader>();
         services.TryAddSingleton<IWindowRulesReloadNotifier, LoggingWindowRulesReloadNotifier>();
-        services.TryAddSingleton<IConfigDirectoryWatcher>(
-            static sp => new ConfigDirectoryWatcher(sp.GetRequiredService<WindowRulesConfigPaths>().UserConfigDirectory));
+        services.TryAddSingleton<IConfigDirectoryWatcher>(static sp =>
+        {
+            WindowRulesConfigPaths configPaths = sp.GetRequiredService<WindowRulesConfigPaths>();
+            return new ConfigDirectoryWatcher(configPaths.UserConfigDirectory, Path.GetFileName(configPaths.UserRulesFilePath));
+        });
 
         // PublishedWindowRulesConfig is registered under its own concrete type (WindowRulesHotReloadService
         // needs the internal Publish method) AND resolved as IPublishedWindowRulesConfig via the same

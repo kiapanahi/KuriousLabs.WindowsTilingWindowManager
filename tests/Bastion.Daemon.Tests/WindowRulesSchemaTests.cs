@@ -24,6 +24,37 @@ public sealed class WindowRulesSchemaTests
     }
 
     [Fact]
+    public void BuildSchemaEncodesTheNonEmptyNameConstraint()
+    {
+        // Regression test for a review finding: the exported schema reflects the DTO shape alone,
+        // so without WindowRulesSchemaWriter's TransformSchemaNode an editor validating against the
+        // published schema would accept an empty "name" that WindowRulesDocument.ValidateRules then
+        // rejects. Asserted explicitly (not just via the broad snapshot above) so a future schema
+        // change can't silently drop this constraint and still pass review as "just a snapshot update."
+        JsonNode schema = WindowRulesSchemaWriter.BuildSchema();
+        JsonNode? nameSchema = schema["properties"]?["rules"]?["items"]?["properties"]?["name"];
+
+        Assert.NotNull(nameSchema);
+        Assert.Equal(1, (int?)nameSchema["minLength"]);
+    }
+
+    [Fact]
+    public void BuildSchemaEncodesTheAtLeastOneMatchCriterionConstraint()
+    {
+        // Same rationale as BuildSchemaEncodesTheNonEmptyNameConstraint, for the other half of
+        // WindowRulesDocument.ValidateRules: WindowRuleMatch must have at least one non-null field.
+        JsonNode schema = WindowRulesSchemaWriter.BuildSchema();
+        JsonNode? matchSchema = schema["properties"]?["rules"]?["items"]?["properties"]?["match"];
+
+        Assert.NotNull(matchSchema);
+        JsonArray anyOf = Assert.IsType<JsonArray>(matchSchema["anyOf"]);
+        var requiredFieldNames = anyOf
+            .Select(static branch => (string)branch!["required"]![0]!)
+            .ToArray();
+        Assert.Equal(["appUserModelId", "executablePath", "className"], requiredFieldNames);
+    }
+
+    [Fact]
     public async Task WriteAsyncWritesAParsableSchemaFileToTheGivenPath()
     {
         string tempDirectory = Directory.CreateTempSubdirectory("bastion-schema-tests-").FullName;
