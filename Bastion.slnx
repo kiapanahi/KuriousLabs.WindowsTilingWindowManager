@@ -14,6 +14,7 @@
     <File Path="global.json" />
     <File Path="nuget.config" />
   </Folder>
+  <Folder Name="/docs/" />
   <Folder Name="/docs/engineering/">
     <File Path="docs/engineering/concurrency-performance.md" />
     <File Path="docs/engineering/daemon-architecture.md" />
