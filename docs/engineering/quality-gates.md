@@ -413,12 +413,13 @@ publish.
 ## 9. Product versioning (MinVer)
 
 GitHub issue #48. Bastion derives one semantic version for the whole product from git tags via
-[MinVer](https://github.com/adamralph/minver), referenced as a bare `<PackageReference
-Include="MinVer" PrivateAssets="all" />` (version pinned centrally in `Directory.Packages.props`,
-per §1) in each of the four shipping projects — `Bastion.Daemon`, `Bastion.Cli`, `Bastion.Win32`,
-`Bastion.TestWindows` — and, once scaffolded (issue #19), `Bastion.Bar`. It is **not** a
-`GlobalPackageReference`: `Bastion.Core`/`Bastion.Layout` ship nothing and stay tooling-free per
-their purity rules (`pure-core` skill).
+[MinVer](https://github.com/adamralph/minver), referenced as a conditional `GlobalPackageReference`
+in `Directory.Packages.props` with `PrivateAssets="all"`, scoped to all projects except
+`Bastion.Core` and `Bastion.Layout` (which ship nothing and must stay tooling-free per their purity
+rules — `pure-core` skill). The condition is `MSBuildProjectName != 'Bastion.Core' and
+MSBuildProjectName != 'Bastion.Layout'`. The four shipping projects that pick it up are
+`Bastion.Daemon`, `Bastion.Cli`, `Bastion.Win32`, and `Bastion.TestWindows` (and, once scaffolded,
+`Bastion.Bar` — issue #19).
 
 - **Why MinVer over Nerdbank.GitVersioning**: `bastiond`/`bastionc`/`bastion-bar` are three
   processes of one product that must always deploy as matching versions — the IPC

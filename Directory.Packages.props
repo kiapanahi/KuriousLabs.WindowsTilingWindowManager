@@ -16,21 +16,23 @@
   </ItemGroup>
 
   <!--
+    Product/release versioning (GitHub issue #48) — GlobalPackageReference scoped to all projects
+    except Bastion.Core and Bastion.Layout, which build and test standalone on Linux CI and ship
+    nothing; their purity rules (pure-core skill) require them to stay tooling-free. Build-time-only
+    MSBuild task package — sets Version/AssemblyVersion/FileVersion/InformationalVersion from git
+    tag + commit height and adds no reference to the built output, so it never appears in the
+    published/trimmed NativeAOT binary. See docs/engineering/quality-gates.md for the tagging
+    convention (MinVerTagPrefix "v").
+  -->
+  <ItemGroup Condition="'$(MSBuildProjectName)' != 'Bastion.Core' and '$(MSBuildProjectName)' != 'Bastion.Layout'">
+    <GlobalPackageReference Include="MinVer" Version="7.0.0" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!--
     Package versions consumed by individual projects via bare <PackageReference>.
     One entry per package id, repo-wide, per docs/engineering/quality-gates.md §1.
   -->
   <ItemGroup>
-    <!--
-      Product/release versioning (GitHub issue #48) — referenced only by the four shipping
-      projects (Bastion.Daemon, Bastion.Cli, Bastion.Win32, Bastion.TestWindows) via a bare
-      <PackageReference> in each .csproj, deliberately NOT a GlobalPackageReference: Bastion.Core/
-      Bastion.Layout ship nothing and must stay tooling-free per their purity rules (pure-core
-      skill). Build-time-only MSBuild task package — sets Version/AssemblyVersion/FileVersion/
-      InformationalVersion from git tag + commit height and adds no reference to the built output,
-      so it never appears in the published/trimmed NativeAOT binary. See
-      docs/engineering/quality-gates.md for the tagging convention (MinVerTagPrefix "v").
-    -->
-    <PackageVersion Include="MinVer" Version="7.0.0" />
 
     <!-- Win32/COM interop (Bastion.Win32 only) -->
     <PackageVersion Include="Microsoft.Windows.CsWin32" Version="0.3.298" />

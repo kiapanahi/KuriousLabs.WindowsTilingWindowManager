@@ -27,7 +27,6 @@
   <ItemGroup>
     <ProjectReference Include="..\Bastion.Win32\Bastion.Win32.csproj" />
     <PackageReference Include="System.CommandLine" />
-    <PackageReference Include="MinVer" PrivateAssets="all" />
   </ItemGroup>
 
 </Project>
