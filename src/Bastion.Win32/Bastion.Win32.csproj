@@ -1,7 +1,26 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net10.0-windows</TargetFramework>
+    <!--
+      Windows-version-suffixed per GitHub issue #6: GetSystemMetricsForDpi/GetDpiForSystem
+      (SystemMinTrackSizeReader) are the first APIs in this project requiring more than the
+      unversioned "windows" (= 7.0, per the platform-compat analyzer's own documented default)
+      baseline the bare "net10.0-windows" TFM implied — both are documented as
+      "Minimum supported client: Windows 10, version 1607" (build 10.0.14393). This SDK's bundled
+      Windows reference assemblies only ship a fixed set of TargetPlatformVersion milestones
+      (confirmed empirically via NETSDK1140's own valid-values list: 7.0, 8.0, 10.0.17763,
+      10.0.18362, 10.0.19041, 10.0.20348, 10.0.22000, 10.0.22621, 10.0.26100 — no 10.0.14393 entry
+      exists) — 10.0.17763 (the "Windows 10 October 2018 Update" SDK) is the lowest of those that
+      still satisfies the >= 10.0.14393 the actual APIs need, so it is used here rather than jumping
+      straight to a newer/rounder value or DESIGN.md's actual Windows 11 25H2 product target. This
+      keeps the platform-compatibility analyzer (CA1416) maximally useful: it still flags any future
+      API needing something newer than what today's code has actually verified, rather than
+      silently permitting anything up to an arbitrarily-chosen higher ceiling. This is a
+      static-analysis-only input (which APIs are visible without a runtime guard) — it does not
+      change what OS the compiled binary can run on, nor substitute for the product-level minimum
+      Windows 11 25H2 requirement DESIGN.md states elsewhere.
+    -->
+    <TargetFramework>net10.0-windows10.0.17763.0</TargetFramework>
     <RootNamespace>Bastion.Win32</RootNamespace>
     <AssemblyName>Bastion.Win32</AssemblyName>
     <Platforms>x64;arm64</Platforms>
