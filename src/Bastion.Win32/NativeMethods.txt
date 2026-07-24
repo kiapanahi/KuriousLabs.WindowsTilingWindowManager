@@ -90,3 +90,16 @@ WIN32_ERROR
 GetSystemMetricsForDpi
 GetDpiForSystem
 SYSTEM_METRICS_INDEX
+
+// Tier-1 input service (DESIGN.md §7, issue #7): RegisterHotKey with MOD_NOREPEAT on a dedicated
+// pump thread, probed at startup; every registered chord is unregistered from the same thread on
+// shutdown (RegisterHotKey/UnregisterHotKey's own documented "by the calling thread" contract,
+// identical in spirit to SetWinEventHook/UnhookWinEvent's same-thread requirement above).
+// HOT_KEY_MODIFIERS and VIRTUAL_KEY are listed explicitly (same discoverability rationale as
+// SYSTEM_METRICS_INDEX/DWMWINDOWATTRIBUTE above) even though CsWin32 would generate both as
+// RegisterHotKey's own parameter types regardless.
+RegisterHotKey
+UnregisterHotKey
+HOT_KEY_MODIFIERS
+VIRTUAL_KEY
+WM_HOTKEY

@@ -1,3 +1,6 @@
+using Windows.Win32.Foundation;
+using Windows.Win32.UI.Input.KeyboardAndMouse;
+
 namespace Bastion.Win32;
 
 /// <summary>
@@ -76,4 +79,36 @@ internal static class HookDiagnostics
         Console.Error.WriteLine(
             "[Bastion.Win32] at least one WinEvent hook failed to unregister; intentionally " +
             "leaking its shared callback context rather than risking a use-after-free.");
+
+    /// <summary>
+    /// Logs a hotkey registration that failed (a bare zero <c>BOOL</c> return from
+    /// <c>RegisterHotKey</c>). Per DESIGN.md §7's honesty note, this is treated as a conflict
+    /// unconditionally — never gated on <c>GetLastError</c> returning specifically
+    /// <c>ERROR_HOTKEY_ALREADY_REGISTERED</c>, since that code is observed behavior for this API,
+    /// not a contractual guarantee. <paramref name="errorCode"/> is logged for diagnostics only,
+    /// never branched on to decide whether the failure "counts" as a conflict.
+    /// </summary>
+    public static void LogHotkeyRegistrationConflict(int id, HOT_KEY_MODIFIERS modifiers, uint virtualKeyCode, WIN32_ERROR? errorCode) =>
+        Console.Error.WriteLine(
+            $"[Bastion.Win32] RegisterHotKey failed for id {id} (modifiers=0x{(uint)modifiers:X}, " +
+            $"vk=0x{virtualKeyCode:X}); treating as a conflict regardless of the specific error " +
+            $"(GetLastError observed: {errorCode?.ToString() ?? "none"}).");
+
+    /// <summary>
+    /// Logs a hotkey that failed to unregister via <c>UnregisterHotKey</c> during shutdown. Not
+    /// immediately fatal on its own — the pump thread is exiting regardless — but a genuine
+    /// occurrence should be visible rather than silently discarded, matching
+    /// <see cref="LogUnhookWinEventFailed"/>'s own rationale for the WinEvent pump's equivalent
+    /// shutdown-time failure.
+    /// </summary>
+    public static void LogUnregisterHotkeyFailed(int id) =>
+        Console.Error.WriteLine($"[Bastion.Win32] UnregisterHotKey failed for id {id} during shutdown.");
+
+    /// <summary>
+    /// Logs a dispatched <see cref="HotkeyCommand"/> — the pre-composition-root stand-in for
+    /// actually invoking a Reconciler-driven layout command (GitHub issue #10). See
+    /// <see cref="LoggingHotkeyDispatchTarget"/>.
+    /// </summary>
+    public static void LogHotkeyInvoked(HotkeyCommand command) =>
+        Console.Error.WriteLine($"[Bastion.Win32] hotkey invoked: {command}.");
 }
