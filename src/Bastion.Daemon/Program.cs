@@ -20,6 +20,14 @@ if (singleInstanceMutex is null)
     return;
 }
 
+// GitHub issue #48/PR #49: read the MinVer-derived running version once, up front, so both the
+// IPC server's `status` command reply (AddBastionIpcServer below) and the startup log after the
+// host is built (see below) report the identical string -- read the identical way bastionc's own
+// PrintAssemblyVersionAction does, rather than leaning on any framework default.
+string version = Assembly.GetExecutingAssembly()
+    .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+    ?? "unknown";
+
 HostApplicationBuilder builder = Host.CreateApplicationBuilder(args);
 
 // Registered first so its StopAsync -- the meaningful half of JournalRestoreOnShutdownService,
@@ -48,12 +56,9 @@ builder.Services.AddBastionInputPipeline();
 // holds this slot.
 builder.Services.AddBastionMonitorTopologyStub();
 
-// Required order, item 4: the named-pipe IPC command/broadcast server. GitHub issue #12 (blocked
-// by this one) owns the real implementation -- deliberately not stubbed here (unlike the monitor
-// topology slot above): issue #12 does not exist yet as running code of any shape, so inventing a
-// placeholder would be pure invention with nothing to anchor it to, versus the monitor topology
-// stub which at least holds a slot for a fully-specified (DESIGN.md §8), merely-not-yet-built
-// service. This is the slot issue #12 fills.
+// Required order, item 4: the named-pipe IPC command/broadcast server (GitHub issues #11/#12) --
+// this is the slot that comment used to mark as "not stubbed here" before this PR filled it.
+builder.Services.AddBastionIpcServer(version);
 
 using IHost host = builder.Build();
 
@@ -70,11 +75,7 @@ HookDiagnostics.Initialize(host.Services.GetRequiredService<ILoggerFactory>().Cr
 
 // GitHub issue #48/PR #49: log the MinVer-derived running version once the host (and therefore
 // real ILogger-based logging) is up, ahead of every hosted service's own startup messages -- the
-// equivalent of the deleted BastiondService's identical startup-version log. Read the identical
-// way bastionc's own PrintAssemblyVersionAction does, rather than leaning on any framework default.
-string version = Assembly.GetExecutingAssembly()
-    .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
-    ?? "unknown";
+// equivalent of the deleted BastiondService's identical startup-version log.
 host.Services.GetRequiredService<ILogger<Program>>().DaemonStarting(version);
 
 await host.RunAsync().ConfigureAwait(false);

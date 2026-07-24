@@ -2,15 +2,17 @@ using System.Collections.Immutable;
 using System.CommandLine;
 using System.Text.Json;
 using Bastion.Cli;
+using Bastion.Core;
 using Bastion.Win32;
 
-// TODO(DESIGN.md §3.9): bastionc is meant to be a thin client over a named-pipe JSON IPC command
-// channel to bastiond (request/reply for commands like `status`/`focus`/`swap`, plus a separate
-// broadcast pipe for state subscriptions). That channel does not exist yet, so the `status`
-// subcommand below is an honest, explicit "not implemented" stub — it does not simulate or fake a
-// response. `restore-windows` (GitHub issue #8) is the one command that must work standalone even
-// when bastiond is not running (DESIGN.md §3.7), so it is real: it reads the write-ahead HWND
-// journal and force-restores every entry directly via Bastion.Win32, without any IPC round trip.
+// DESIGN.md §3.9: bastionc is a thin client over a named-pipe JSON IPC command channel to
+// bastiond (GitHub issues #11/#12). `status` is the one command round-tripped end-to-end for this
+// PR -- it sends a StatusCommand and prints bastiond's reply; bastionc contains no tiling/business
+// logic of its own. `restore-windows` (GitHub issue #8) is, and remains, a *different*, standalone
+// path: it must work even when bastiond is not running (DESIGN.md §3.7), so it reads the
+// write-ahead HWND journal and force-restores every entry directly via Bastion.Win32, without any
+// IPC round trip -- retrofitting it to also try IPC first when the daemon is up would be a real,
+// defensible enhancement but is out of scope for the already-closed issue #8.
 
 RootCommand rootCommand = new("bastionc — thin IPC client for bastiond. See DESIGN.md §3.9.");
 
@@ -22,8 +24,8 @@ VersionOption versionOption = rootCommand.Options.OfType<VersionOption>().Single
 versionOption.Action = new PrintAssemblyVersionAction();
 if (!rootCommand.Options.Contains(versionOption)) rootCommand.Options.Add(versionOption);
 
-Command statusCommand = new("status", "Query the daemon's current window/monitor topology.");
-statusCommand.SetAction(_ => NotYetImplemented("status"));
+Command statusCommand = new("status", "Query whether bastiond is running and which version.");
+statusCommand.SetAction((_, cancellationToken) => StatusAsync(cancellationToken));
 rootCommand.Subcommands.Add(statusCommand);
 
 Command restoreWindowsCommand = new(
@@ -35,12 +37,82 @@ rootCommand.Subcommands.Add(restoreWindowsCommand);
 
 return await rootCommand.Parse(args).InvokeAsync().ConfigureAwait(false);
 
-static int NotYetImplemented(string subcommandName)
+/// <summary>
+/// GitHub issue #11's one round-tripped command: check the daemon-presence mutex first (never a
+/// throwing connect attempt against a daemon that plainly isn't running), then send a
+/// <see cref="StatusCommand"/> and print whatever <see cref="IpcReply"/> comes back.
+/// </summary>
+static async Task<int> StatusAsync(CancellationToken cancellationToken)
 {
-    Console.Error.WriteLine(
-        $"bastionc {subcommandName}: not yet implemented — the named-pipe JSON IPC command " +
-        "channel (DESIGN.md §3.9) does not exist yet.");
-    return 1;
+    if (!DaemonPresenceProbe.IsDaemonRunning())
+    {
+        await Console.Error.WriteLineAsync("bastionc status: bastiond is not running.").ConfigureAwait(false);
+        return 1;
+    }
+
+    IpcReply reply;
+    try
+    {
+        reply = await IpcClient.SendCommandAsync(
+            new StatusCommand(IpcCommand.CurrentProtocolVersion),
+            connectTimeout: TimeSpan.FromSeconds(5),
+            cancellationToken).ConfigureAwait(false);
+    }
+    catch (TimeoutException)
+    {
+        await Console.Error.WriteLineAsync("bastionc status: timed out connecting to bastiond.").ConfigureAwait(false);
+        return 1;
+    }
+    catch (IOException ex)
+    {
+        await Console.Error.WriteLineAsync($"bastionc status: lost connection to bastiond: {ex.Message}").ConfigureAwait(false);
+        return 1;
+    }
+    catch (Exception ex) when (ex is JsonException or InvalidDataException)
+    {
+        // A malformed reply from a buggy or differently-versioned bastiond: IpcClient itself can
+        // throw JsonException (invalid JSON syntax, or a reply that deserializes to null -- see
+        // its own `?? throw new JsonException(...)` guard) or propagate
+        // IpcFraming.ReadFrameAsync's InvalidDataException (a corrupt/hostile frame-length
+        // prefix). Either way this must surface as the same clean, user-facing error every other
+        // failure mode above gets, not an unhandled exception crashing bastionc (Copilot review
+        // finding on this PR).
+        await Console.Error.WriteLineAsync($"bastionc status: received a malformed reply from bastiond: {ex.Message}").ConfigureAwait(false);
+        return 1;
+    }
+
+    return await PrintStatusReplyAsync(reply).ConfigureAwait(false);
+}
+
+/// <summary>Prints one status reply to stdout/stderr as appropriate. Returns the process exit code.</summary>
+static async Task<int> PrintStatusReplyAsync(IpcReply reply)
+{
+    switch (reply)
+    {
+        case StatusReply status:
+            await Console.Out.WriteLineAsync($"bastiond is running (version {status.DaemonVersion}, protocol {status.ProtocolVersion}).").ConfigureAwait(false);
+            return 0;
+
+        case ProtocolVersionMismatchReply mismatch:
+            // A clear "daemon is a different version" message, not a raw deserialization
+            // exception (GitHub issue #11's own acceptance criteria).
+            await Console.Error.WriteLineAsync(
+                $"bastionc status: bastiond is a different protocol version (daemon expects {mismatch.ProtocolVersion}, " +
+                $"bastionc sent {mismatch.ReceivedProtocolVersion}) -- restart bastiond after upgrading bastionc, or vice versa.")
+                .ConfigureAwait(false);
+            return 1;
+
+        case ErrorReply error:
+            await Console.Error.WriteLineAsync($"bastionc status: {error.Message}").ConfigureAwait(false);
+            return 1;
+
+        default:
+            // An unrecognized reply kind (e.g. a newer bastiond talking to an older bastionc) must
+            // count as a failure, not a silent success -- mirrors RestoreWindowsAsync's own
+            // unrecognized-outcome handling below.
+            await Console.Error.WriteLineAsync($"bastionc status: unrecognized reply from bastiond: {reply.GetType().Name}.").ConfigureAwait(false);
+            return 1;
+    }
 }
 
 static async Task<int> RestoreWindowsAsync(CancellationToken cancellationToken)
