@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
@@ -195,4 +196,104 @@ public sealed class IpcCommandServerPumpTests
         // treated as expected shutdown, not surfaced to the caller.
         await pump.StopAsync(TestContext.Current.CancellationToken);
     }
+
+    /// <summary>
+    /// Regression test for a real bug (GitHub Copilot review finding on this PR):
+    /// <see cref="IpcClient.SendCommandAsync"/> can throw <see cref="JsonException"/> -- either
+    /// straight from <see cref="JsonSerializer.Deserialize"/> on genuinely invalid JSON syntax, or
+    /// from <see cref="IpcClient"/>'s own explicit <c>?? throw new JsonException("IPC reply
+    /// deserialized to null.")</c> guard when the reply body is the valid JSON <c>null</c> literal
+    /// -- but nothing in this suite proved either path, so <c>bastionc</c>'s <c>status</c> command
+    /// (the only caller) had an uncaught exception waiting for it against a malformed or
+    /// differently-versioned daemon instead of the clean, user-facing error every other failure
+    /// mode gets.
+    /// </summary>
+    /// <remarks>
+    /// Written directly against a hand-rolled fake daemon bound to the real
+    /// <see cref="IpcPipeNames.Command"/> pipe -- never through <see cref="IpcCommandServerPump"/>/
+    /// <see cref="IpcCommandProcessor"/>, which could never produce either malformed body -- the
+    /// same "fake the other side directly via IpcFraming" approach
+    /// <see cref="ANonObjectJsonRootGetsATypedErrorReplyRatherThanADisconnectedPipe"/> already uses
+    /// for the request side. Safe to place in this same test class/collection (rather than a
+    /// dedicated fake-daemon test class) because it binds the identical fixed
+    /// <see cref="IpcPipeNames.Command"/> pipe name every other test in this file also uses: xUnit
+    /// runs the methods of one test class sequentially by default, so there is no risk of this
+    /// method's raw server instance colliding with another test method's real
+    /// <see cref="IpcCommandServerPump"/> the way there would be across two different test classes
+    /// (different, potentially-parallel collections) -- see <see cref="IpcFramingTests"/>'s own
+    /// remarks for why that cross-class risk is why its own pipe names are GUID-suffixed instead.
+    /// </remarks>
+    [Theory]
+    [InlineData("this is not valid json at all")]
+    [InlineData("null")]
+    [InlineData("""{"$reply":"someFutureReplyKind","protocolVersion":1}""")]
+    public async Task SendCommandAsyncThrowsJsonExceptionForAMalformedOrNullReplyBody(string malformedReplyBody)
+    {
+        NamedPipeServerStream fakeDaemon = CreateFakeDaemonPipe();
+        try
+        {
+            Task<IpcReply> clientTask = IpcClient.SendCommandAsync(
+                new StatusCommand(IpcCommand.CurrentProtocolVersion),
+                TimeSpan.FromSeconds(10),
+                TestContext.Current.CancellationToken);
+
+            await fakeDaemon.WaitForConnectionAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
+            await IpcFraming.ReadFrameAsync(fakeDaemon, TestContext.Current.CancellationToken).ConfigureAwait(true); // drain the request
+            await IpcFraming.WriteFrameAsync(fakeDaemon, Encoding.UTF8.GetBytes(malformedReplyBody), TestContext.Current.CancellationToken).ConfigureAwait(true);
+
+            await Assert.ThrowsAsync<JsonException>(async () => await clientTask.ConfigureAwait(true)).ConfigureAwait(true);
+        }
+        finally
+        {
+            await fakeDaemon.DisposeAsync().ConfigureAwait(true);
+        }
+    }
+
+    /// <summary>
+    /// Regression test for a real bug (GitHub Copilot review finding on this PR):
+    /// <see cref="IpcFraming.ReadFrameAsync"/>'s frame-length guard (already proven directly
+    /// against <see cref="IpcFraming"/> itself by <see cref="IpcFramingTests"/>) applies just as
+    /// much to <see cref="IpcClient"/> reading a reply as it does to the server reading a request
+    /// -- a corrupt or hostile length prefix from whatever is listening on <c>bastiond</c>'s pipe
+    /// name must not go uncaught by <see cref="IpcClient.SendCommandAsync"/> callers such as
+    /// <c>bastionc</c>'s <c>status</c> command.
+    /// </summary>
+    [Fact]
+    public async Task SendCommandAsyncThrowsInvalidDataExceptionWhenTheReplyFrameDeclaresACorruptLength()
+    {
+        NamedPipeServerStream fakeDaemon = CreateFakeDaemonPipe();
+        try
+        {
+            Task<IpcReply> clientTask = IpcClient.SendCommandAsync(
+                new StatusCommand(IpcCommand.CurrentProtocolVersion),
+                TimeSpan.FromSeconds(10),
+                TestContext.Current.CancellationToken);
+
+            await fakeDaemon.WaitForConnectionAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
+            await IpcFraming.ReadFrameAsync(fakeDaemon, TestContext.Current.CancellationToken).ConfigureAwait(true); // drain the request
+
+            byte[] header = new byte[4];
+            BinaryPrimitives.WriteInt32LittleEndian(header, IpcFraming.MaxFrameLength + 1);
+            await fakeDaemon.WriteAsync(header, TestContext.Current.CancellationToken).ConfigureAwait(true);
+
+            await Assert.ThrowsAsync<InvalidDataException>(async () => await clientTask.ConfigureAwait(true)).ConfigureAwait(true);
+        }
+        finally
+        {
+            await fakeDaemon.DisposeAsync().ConfigureAwait(true);
+        }
+    }
+
+    // Mirrors IpcCommandServerPump.CreatePipe()'s own buffer sizing (see that method's remarks for
+    // why an explicit, nonzero buffer size is load-bearing) -- this pipe plays the role of a
+    // buggy/malicious/differently-versioned bastiond for the two tests above, so it must behave
+    // like a real one in every way that matters to IpcClient.
+    private static NamedPipeServerStream CreateFakeDaemonPipe() => new(
+        IpcPipeNames.Command,
+        PipeDirection.InOut,
+        NamedPipeServerStream.MaxAllowedServerInstances,
+        PipeTransmissionMode.Byte,
+        PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly,
+        inBufferSize: 4096,
+        outBufferSize: 4096);
 }

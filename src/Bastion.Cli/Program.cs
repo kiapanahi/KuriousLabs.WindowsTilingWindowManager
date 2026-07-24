@@ -68,7 +68,25 @@ static async Task<int> StatusAsync(CancellationToken cancellationToken)
         await Console.Error.WriteLineAsync($"bastionc status: lost connection to bastiond: {ex.Message}").ConfigureAwait(false);
         return 1;
     }
+    catch (Exception ex) when (ex is JsonException or InvalidDataException)
+    {
+        // A malformed reply from a buggy or differently-versioned bastiond: IpcClient itself can
+        // throw JsonException (invalid JSON syntax, or a reply that deserializes to null -- see
+        // its own `?? throw new JsonException(...)` guard) or propagate
+        // IpcFraming.ReadFrameAsync's InvalidDataException (a corrupt/hostile frame-length
+        // prefix). Either way this must surface as the same clean, user-facing error every other
+        // failure mode above gets, not an unhandled exception crashing bastionc (Copilot review
+        // finding on this PR).
+        await Console.Error.WriteLineAsync($"bastionc status: received a malformed reply from bastiond: {ex.Message}").ConfigureAwait(false);
+        return 1;
+    }
 
+    return await PrintStatusReplyAsync(reply).ConfigureAwait(false);
+}
+
+/// <summary>Prints one status reply to stdout/stderr as appropriate. Returns the process exit code.</summary>
+static async Task<int> PrintStatusReplyAsync(IpcReply reply)
+{
     switch (reply)
     {
         case StatusReply status:

@@ -70,7 +70,9 @@ internal sealed partial class IpcBroadcastServerPump(ILogger<IpcBroadcastServerP
     // block, via the `foreach` over `_subscribers.Keys`). Every path is genuinely covered: the
     // accept-failure catch disposes the failed instance directly; a successfully-accepted
     // instance is disposed exactly once, either by PublishAsync's prune-on-failed-write or by
-    // this finally block at shutdown.
+    // this finally block's `_subscribers.Keys` loop at shutdown; and the still-listening,
+    // not-yet-connected instance current when the loop exits -- by either exit path -- is
+    // disposed by this finally block's own unconditional first statement (see the remarks there).
     [SuppressMessage(
         "Reliability",
         "CA2000:Dispose objects before losing scope",
@@ -92,7 +94,6 @@ internal sealed partial class IpcBroadcastServerPump(ILogger<IpcBroadcastServerP
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                 {
-                    await pipe.DisposeAsync().ConfigureAwait(false);
                     break;
                 }
                 catch (Exception ex) when (ex is IOException or InvalidOperationException)
@@ -113,6 +114,18 @@ internal sealed partial class IpcBroadcastServerPump(ILogger<IpcBroadcastServerP
         }
         finally
         {
+            // Unconditional, and first: covers whichever `pipe` value is current regardless of
+            // which of the loop's two exit paths was taken. The OperationCanceledException catch
+            // above only handles one of them -- the loop's own condition
+            // (`!stoppingToken.IsCancellationRequested`) can itself go false immediately after a
+            // connection was accepted and registered (`pipe` already reassigned to the next
+            // listening instance via "listen on N, spin up N+1"), exiting the loop at the top
+            // without ever entering that catch at all. Left undisposed, that instance would never
+            // appear in `_subscribers` (only `connected` is registered there) and would leak.
+            // Mirrors IpcCommandServerPump.ExecuteAsync's identical unconditional
+            // `await pipe.DisposeAsync()` in its own finally block.
+            await pipe.DisposeAsync().ConfigureAwait(false);
+
             foreach (NamedPipeServerStream subscriber in _subscribers.Keys)
             {
                 await subscriber.DisposeAsync().ConfigureAwait(false);

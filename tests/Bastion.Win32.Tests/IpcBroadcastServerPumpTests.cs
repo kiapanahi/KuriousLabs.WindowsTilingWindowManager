@@ -150,6 +150,81 @@ public sealed class IpcBroadcastServerPumpTests
         }
     }
 
+    /// <summary>
+    /// Regression test for a real bug (GitHub Copilot review finding on this PR):
+    /// <see cref="IpcBroadcastServerPump.ExecuteAsync"/>'s accept loop has a second exit path
+    /// besides the <see cref="OperationCanceledException"/> catch's explicit <see langword="break"/>
+    /// -- the loop's own <c>while (!stoppingToken.IsCancellationRequested)</c> condition can itself
+    /// go false immediately after a connection was accepted and registered ("listen on N, spin up
+    /// N+1" already created the *next* listening <c>pipe</c> instance before that check runs), so
+    /// the loop can exit at the top without that fresh instance ever being serviced, registered in
+    /// <c>_subscribers</c>, or reached by the old <see langword="finally"/> block (which only
+    /// walked <c>_subscribers.Keys</c>).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Proven via an externally observable OS-level effect rather than reflection into private
+    /// state: if the still-listening instance leaked, it would remain bound to
+    /// <see cref="IpcPipeNames.Broadcast"/> and able to accept exactly one more connection even
+    /// after <see cref="Microsoft.Extensions.Hosting.BackgroundService.StopAsync"/> returns --
+    /// and per that base class's own documented contract ("the host blocks in StopAsync waiting
+    /// for ExecuteAsync to complete"), that makes this a deterministic post-condition of
+    /// <c>StopAsync</c> having returned, not a timing-sensitive race on this test's side. With the
+    /// fix, nothing remains listening at all, so a fresh client connecting immediately afterward
+    /// must time out instead.
+    /// </para>
+    /// <para>
+    /// <b>This does not, and cannot practically, force the exact interleaving that produced the
+    /// leak.</b> That specific exit path requires <c>StopAsync</c>'s cancellation to land in the
+    /// narrow gap between "the previous connection was registered" and "the loop's own
+    /// <see langword="while"/> re-check" -- a span of plain synchronous C# statements with no
+    /// <see langword="await"/> in between, so nothing this test can do from the outside reliably
+    /// preempts it there (confirmed empirically: neither waiting for
+    /// <see cref="IpcBroadcastServerPump.SubscriberCount"/> to observe a registered subscriber
+    /// before calling <c>StopAsync</c>, nor racing dozens of concurrent connects against
+    /// <c>StopAsync</c> across many repetitions, ever reproduced the leak against the pre-fix code
+    /// in this environment -- thread-pool/IOCP dispatch here is simply too eager). What this test
+    /// verifies instead is the resulting, always-true contract the fix establishes -- nothing is
+    /// ever left listening once <c>StopAsync</c> returns -- which is both the observable behavior
+    /// that actually matters to callers and the same behavior an unconditional dispose-in-finally
+    /// guarantees regardless of which exit path is taken.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task StopAsyncLeavesNothingListeningOnTheBroadcastPipeEvenAfterServicingAConnection()
+    {
+        using var pump = new IpcBroadcastServerPump(NullLogger<IpcBroadcastServerPump>.Instance);
+        await pump.StartAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
+
+        NamedPipeClientStream subscriber = await ConnectSubscriberAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
+        try
+        {
+            await WaitUntilAsync(() => pump.SubscriberCount >= 1, TestContext.Current.CancellationToken).ConfigureAwait(true);
+        }
+        finally
+        {
+            await subscriber.DisposeAsync().ConfigureAwait(true);
+        }
+
+        await pump.StopAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
+
+        // Nothing -- neither the disposed former subscriber nor whichever instance was still
+        // listening for the next connection -- may remain bound to IpcPipeNames.Broadcast once
+        // StopAsync has returned; a fresh client connecting immediately afterward must time out.
+        var probe = new NamedPipeClientStream(
+            ".", IpcPipeNames.Broadcast, PipeDirection.In, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+        try
+        {
+            await Assert.ThrowsAsync<TimeoutException>(
+                async () => await probe.ConnectAsync(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken).ConfigureAwait(true))
+                .ConfigureAwait(true);
+        }
+        finally
+        {
+            await probe.DisposeAsync().ConfigureAwait(true);
+        }
+    }
+
     // Ordinary async helpers, not test methods themselves -- xUnit1030's ConfigureAwait(true)
     // requirement is scoped to [Fact]/[Theory] methods, so these follow the general
     // library-code convention (ConfigureAwait(false)) instead, same as IpcClient.SendCommandAsync.
