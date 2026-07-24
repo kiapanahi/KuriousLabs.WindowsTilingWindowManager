@@ -6,8 +6,8 @@ namespace Bastion.TestWindows.Tests;
 /// <summary>
 /// Tier 1 unit tests (docs/engineering/testing.md §3) for <see cref="TestWindowOptions.Parse"/> —
 /// the only part of this project (GitHub issue #13) testable without a live desktop session.
-/// <see cref="TestWindowSpawner.Run"/>/<c>WndProc</c>/<c>WatchStdinForEof</c> need one and are
-/// exercised only by the not-yet-built Tier 3 harness (DESIGN.md §11).
+/// <see cref="TestWindowSpawner.Run"/>/<c>WndProc</c>/<c>WatchStdinForShutdownSignal</c> need one
+/// and are exercised only by the not-yet-built Tier 3 harness (DESIGN.md §11).
 /// </summary>
 public sealed class TestWindowOptionsTests
 {
