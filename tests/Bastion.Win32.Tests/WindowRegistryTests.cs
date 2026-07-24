@@ -194,6 +194,28 @@ public sealed class WindowRegistryTests
     }
 
     [Fact]
+    public async Task TryGetHwndDetectsRecyclingEvenWithoutAnInterveningTryAdmitAsyncCall()
+    {
+        // Codex review finding on this PR: if the OS recycles hwnd to an unrelated window before
+        // the original's queued EVENT_OBJECT_DESTROY is processed (Purge not yet called), a caller
+        // that only ever goes through TryGetHwnd -- never re-running TryAdmitAsync, which is exactly
+        // how the Placement Executor calls this -- must not be handed back a now-stale HWND that
+        // identifies a different window.
+        _pidReader.SetPid(s_someWindow, SomePid);
+        WindowRegistry registry = CreateRegistry();
+        WindowId? windowId = await registry.TryAdmitAsync(s_someWindow, TestContext.Current.CancellationToken);
+
+        // Recycled to an unrelated window with a different live PID -- nothing calls TryAdmitAsync
+        // or Purge to notice.
+        _pidReader.SetPid(s_someWindow, 999);
+
+        Assert.False(registry.TryGetHwnd(windowId!.Value, out _));
+
+        // The stale mapping must also be gone, not just misreported this one time.
+        Assert.Null(registry.TryGetEntry(s_someWindow));
+    }
+
+    [Fact]
     public async Task EntryRecordsTheInjectedTimeProviderAsFirstSeenTimestamp()
     {
         _pidReader.SetPid(s_someWindow, SomePid);

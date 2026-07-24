@@ -48,6 +48,25 @@ internal sealed record PlacementExecutorOptions
     /// </summary>
     public double SizeToleranceDevicePixels { get; init; } = 1.0;
 
+    /// <summary>
+    /// How long <see cref="PlacementExecutor.ApplyAsync"/> waits, once per pass (never per window),
+    /// before verifying any window placed via <c>WPF_ASYNCWINDOWPLACEMENT</c> (state normalization)
+    /// or <c>SWP_ASYNCWINDOWPOS</c> (the per-window fallback). Both flags are documented to post the
+    /// request to the target window's own thread rather than waiting for it to be processed when
+    /// that thread is on a different input queue from the caller — the overwhelmingly common case
+    /// for a foreign window — so a successful return only means the request was <em>posted</em>, not
+    /// applied; an immediate geometry read can still see the pre-move bounds and misreport a clamp
+    /// (Codex review finding on GitHub issue #5's PR). This is "engineering practice, not a
+    /// documented constant" in the same sense as <c>Coalescer.DefaultCoalesceWindow</c> — there is no
+    /// documented SLA for how quickly a posted window message is processed, so this is a
+    /// deliberately small, config-tunable, best-effort bound, not a guarantee. The synchronous
+    /// <c>BeginDeferWindowPos</c>/<c>DeferWindowPos</c>/<c>EndDeferWindowPos</c> batch path never
+    /// waits on this — <c>EndDeferWindowPos</c> without <c>SWP_ASYNCWINDOWPOS</c> already blocks
+    /// until every window's <c>WM_WINDOWPOSCHANGED</c> is processed (DESIGN.md §3.6d: "EndDeferWindowPos
+    /// sends synchronously").
+    /// </summary>
+    public TimeSpan AsyncVerifyDelay { get; init; } = TimeSpan.FromMilliseconds(25);
+
     /// <summary>The shipped default configuration.</summary>
     public static PlacementExecutorOptions Default { get; } = new();
 }

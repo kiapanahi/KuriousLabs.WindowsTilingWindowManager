@@ -20,26 +20,34 @@ namespace Bastion.Win32;
 /// <see cref="Reconciler.ConvergeOnceAsync"/>'s own return value and the
 /// <see cref="Reconciler.LastPlacementPlan"/> property — so no change to its public surface was
 /// needed to make this executor a real consumer; a future composition root (GitHub issue #10) wires
-/// <c>await reconciler.ConvergeOnceAsync(ct)</c>'s result directly into <see cref="Apply"/>.
+/// <c>await reconciler.ConvergeOnceAsync(ct)</c>'s result directly into <see cref="ApplyAsync"/>.
 /// </para>
 /// <para>
-/// <b><see cref="Apply"/> is deliberately synchronous, not <c>Task</c>-returning.</b> Every
-/// operation it performs — the hang probe, every geometry read, <c>SetWindowPlacement</c>, the
-/// Defer-batch triad, the per-window fallback — is a plain, blocking Win32 syscall; none of them
-/// are COM calls needing the dedicated STA thread (interop.md §5 scopes that requirement to shell
-/// COM specifically) and none genuinely await anything. Wrapping a method with no real asynchronous
-/// work in <c>async</c>/<c>Task.FromResult</c> would misrepresent it as cheap/non-blocking when a
-/// worst case (every window in a batch newly hung) blocks the calling thread for up to
-/// <c>HangProbeTimeout × batch size</c>. Whether a future caller running this from an async context
-/// wants to shield itself from that (e.g. <c>Task.Run</c>) is a threading-model decision for that
-/// caller (GitHub issue #10) to make with full context, not one this issue should guess at.
+/// <b>Correction: <see cref="ApplyAsync"/> is genuinely asynchronous, not the synchronous method an
+/// earlier revision of this type used.</b> Both <c>WPF_ASYNCWINDOWPLACEMENT</c> (state
+/// normalization) and <c>SWP_ASYNCWINDOWPOS</c> (the per-window fallback) are documented to *post*
+/// the request to the target window's thread rather than wait for it to be processed, whenever that
+/// thread is on a different input queue than the caller — true for essentially every foreign window
+/// bastiond will ever place. A successful return from either call therefore only means "posted," not
+/// "applied": reading geometry back immediately can still observe the pre-move bounds and misreport
+/// a clamp (Codex review finding on this PR). <see cref="ApplyAsync"/> defers verification for every
+/// window placed through one of those two async-flagged paths and, once per <em>pass</em> (never per
+/// window — the cost must not scale with batch size), awaits one bounded
+/// <see cref="PlacementExecutorOptions.AsyncVerifyDelay"/> via <c>Task.Delay(TimeSpan, TimeProvider)</c>
+/// before reading any of them back. The synchronous <c>BeginDeferWindowPos</c>/<c>DeferWindowPos</c>/
+/// <c>EndDeferWindowPos</c> batch path needs no such wait — <c>EndDeferWindowPos</c> without
+/// <c>SWP_ASYNCWINDOWPOS</c> already blocks until every window's <c>WM_WINDOWPOSCHANGED</c> is
+/// processed (DESIGN.md §3.6d: "EndDeferWindowPos sends synchronously" — the very reason hung
+/// windows must be excluded from the batch rather than relying on this flag inside it) — it verifies
+/// immediately, with no delay. A pass whose every instruction resolves via <c>Untile</c>, a vanished
+/// <c>WindowId</c>, quarantine, or the synchronous batch pays no delay at all.
 /// </para>
 /// <para>
 /// <b>Not thread-safe; expects sequential invocation.</b> Matches the single-threaded-actor
 /// architecture the whole pipeline assumes upstream (DESIGN.md §3, §3.4's <see cref="Reconciler"/>
 /// remarks) — exactly one plan is being applied at a time in production. <see cref="_quarantine"/>'s
 /// dictionary is not guarded by a lock; a future caller that ever needs concurrent
-/// <see cref="Apply"/> calls must serialize them itself.
+/// <see cref="ApplyAsync"/> calls must serialize them itself.
 /// </para>
 /// <para>
 /// <b>Hang quarantine has two independent parts.</b> A <em>transient</em> backoff
@@ -61,13 +69,21 @@ namespace Bastion.Win32;
 /// was requested by more than <see cref="PlacementExecutorOptions.SizeToleranceDevicePixels"/>, the
 /// outcome's <see cref="PlacementOutcome.ClampedTo"/> is populated — the data GitHub issue #6's
 /// learned effective-min-size cache will eventually subscribe to (not built here). If <em>any</em>
-/// outcome in a pass is clamped, <see cref="Apply"/> calls
+/// outcome in a pass is clamped, <see cref="ApplyAsync"/> calls
 /// <see cref="IReconcileNowSignal.RequestReconcileNow"/> exactly once — never once per clamped
 /// window. The "budgeted" part of "one budgeted re-layout" is not re-implemented here at all: it is
 /// already the Reconciler's own reassert-budget mechanism (GitHub issue #4,
 /// <c>ReconcilerOptions.ReassertBudgetPerWindow</c>), which this signal's target convergence pass
 /// runs through regardless of who woke it — a chronically-clamped window is untiled by that
 /// existing mechanism, not by anything new here.
+/// </para>
+/// <para>
+/// <b>Outcome order matches plan order.</b> Every instruction's outcome is written into its own
+/// reserved slot (keyed by its original index in <paramref name="plan"/>, threaded through
+/// <see cref="BatchCandidate"/>/<see cref="PendingVerification"/>) rather than appended in whatever
+/// order each execution phase (synchronous rejections, the Defer batch, deferred async
+/// verifications) happens to finish in — a plan mixing <c>Untile</c> and <c>Move</c> instructions
+/// would otherwise come back reordered (Codex review finding on this PR).
 /// </para>
 /// </remarks>
 [SuppressMessage(
@@ -88,25 +104,25 @@ internal sealed class PlacementExecutor(
 
     /// <summary>
     /// Applies every <see cref="PlacementInstruction"/> in <paramref name="plan"/>, one outcome per
-    /// instruction, in order. See this type's remarks for why this is synchronous.
+    /// instruction, in the same order as <paramref name="plan"/>. See this type's remarks for why
+    /// this awaits a bounded, pass-wide settle delay for async-flagged placements.
     /// </summary>
-    public ImmutableArray<PlacementOutcome> Apply(ImmutableArray<PlacementInstruction> plan, CancellationToken cancellationToken = default)
+    public async Task<ImmutableArray<PlacementOutcome>> ApplyAsync(ImmutableArray<PlacementInstruction> plan, CancellationToken cancellationToken = default)
     {
         if (plan.IsEmpty)
         {
             return ImmutableArray<PlacementOutcome>.Empty;
         }
 
-        var pass = new ApplyPass(system.ReadPrimaryWorkArea());
-        ImmutableArray<PlacementOutcome>.Builder outcomes = ImmutableArray.CreateBuilder<PlacementOutcome>(plan.Length);
+        var pass = new ApplyPass(system.ReadPrimaryWorkArea(), plan.Length);
 
-        foreach (PlacementInstruction instruction in plan)
+        for (int index = 0; index < plan.Length; index++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            ProcessInstruction(instruction, pass, outcomes);
+            ProcessInstruction(plan[index], index, pass);
         }
 
-        if (pass.Batchable.Count > 0 && !TryApplyBatch(pass.Batchable, outcomes, pass))
+        if (pass.Batchable.Count > 0 && !TryApplyBatch(pass.Batchable, pass))
         {
             // DESIGN.md §3.6d: any DeferWindowPos failure abandons the whole HDWP -- every window
             // that was going to be in this batch needs the per-window fallback, not just whichever
@@ -114,26 +130,36 @@ internal sealed class PlacementExecutor(
             pass.PerWindowFallback.AddRange(pass.Batchable);
         }
 
-        ApplyPerWindowFallbacks(pass, outcomes);
+        IssuePerWindowFallbacks(pass);
+
+        if (pass.PendingVerifications.Count > 0)
+        {
+            // See this type's remarks: one bounded, pass-wide wait for every window placed through
+            // an async-flagged path this pass, never a per-window wait.
+            await Task.Delay(_options.AsyncVerifyDelay, timeProvider, cancellationToken).ConfigureAwait(false);
+        }
+
+        FinalizeVerifications(pass);
 
         if (pass.AnyClamped)
         {
             reconcileNowSignal.RequestReconcileNow();
         }
 
-        return outcomes.ToImmutable();
+        return ImmutableArray.Create(pass.Outcomes);
     }
 
     /// <summary>
     /// Runs the hang-probe/border-correction/state-normalization-or-batch-queue decision for one
-    /// instruction, appending a completed outcome directly or queuing a <see cref="BatchCandidate"/>
-    /// onto <paramref name="pass"/> for later batch/fallback processing.
+    /// instruction, writing a completed outcome directly into <c>pass.Outcomes[index]</c> or queuing
+    /// a <see cref="BatchCandidate"/> onto <paramref name="pass"/> for later batch/fallback
+    /// processing.
     /// </summary>
-    private void ProcessInstruction(PlacementInstruction instruction, ApplyPass pass, ImmutableArray<PlacementOutcome>.Builder outcomes)
+    private void ProcessInstruction(PlacementInstruction instruction, int index, ApplyPass pass)
     {
         if (instruction.Action == PlacementAction.Untile)
         {
-            outcomes.Add(PlacementOutcome.Untiled(instruction.WindowId));
+            pass.Outcomes[index] = PlacementOutcome.Untiled(instruction.WindowId);
             return;
         }
 
@@ -142,27 +168,15 @@ internal sealed class PlacementExecutor(
             // Vanished between the Reconciler's plan and this pass -- a routine race, not
             // exceptional; the next convergence pass naturally forgets it once EnumWindows stops
             // reporting it (matching WindowSystemAdapter's own established posture).
-            outcomes.Add(PlacementOutcome.Failed(instruction.WindowId, errorCode: null));
+            pass.Outcomes[index] = PlacementOutcome.Failed(instruction.WindowId, errorCode: null);
             return;
         }
 
         QuarantineState quarantine = GetOrCreateQuarantine(instruction.WindowId);
-        DateTimeOffset now = timeProvider.GetUtcNow();
-
-        if (quarantine.IsBackedOff(now))
+        if (TryQuarantine(instruction.WindowId, hwnd, quarantine, index, pass))
         {
-            outcomes.Add(PlacementOutcome.QuarantinedHung(instruction.WindowId));
             return;
         }
-
-        if (system.ProbeIsHung(hwnd, _options.HangProbeTimeout))
-        {
-            quarantine.RecordHang(now, _options);
-            outcomes.Add(PlacementOutcome.QuarantinedHung(instruction.WindowId));
-            return;
-        }
-
-        quarantine.RecordResponsive();
 
         // TargetBounds is only ever null for Untile (handled above) -- PlacementInstruction's own
         // Move factory requires a non-null Rect (Bastion.Core.PlacementInstruction's own remarks),
@@ -178,42 +192,82 @@ internal sealed class PlacementExecutor(
 
         if (state.NeedsStateNormalization)
         {
-            ApplyStateNormalization(instruction.WindowId, hwnd, requestedTarget, correctedTarget, state, pass, outcomes);
+            ApplyStateNormalization(index, instruction.WindowId, hwnd, requestedTarget, correctedTarget, state, pass);
             return;
         }
 
-        var candidate = new BatchCandidate(instruction.WindowId, hwnd, requestedTarget, correctedTarget);
-        (quarantine.HasEverBeenHung ? pass.PerWindowFallback : pass.Batchable).Add(candidate);
+        var candidate = new BatchCandidate(index, instruction.WindowId, hwnd, requestedTarget, correctedTarget);
+        if (quarantine.HasEverBeenHung)
+        {
+            pass.PerWindowFallback.Add(candidate);
+        }
+        else
+        {
+            pass.Batchable.Add(candidate);
+        }
+    }
+
+    /// <summary>
+    /// Runs the hang-probe/backoff decision for one window (DESIGN.md §3.6a, §9). Returns
+    /// <see langword="true"/> (and writes a <see cref="PlacementOutcomeKind.QuarantinedHung"/>
+    /// outcome into <c>pass.Outcomes[index]</c>) if the window is currently within its transient
+    /// backoff or just failed a fresh probe; <see langword="false"/> if it is clear to proceed.
+    /// </summary>
+    private bool TryQuarantine(WindowId windowId, HWND hwnd, QuarantineState quarantine, int index, ApplyPass pass)
+    {
+        DateTimeOffset now = timeProvider.GetUtcNow();
+
+        if (quarantine.IsBackedOff(now))
+        {
+            pass.Outcomes[index] = PlacementOutcome.QuarantinedHung(windowId);
+            return true;
+        }
+
+        if (system.ProbeIsHung(hwnd, _options.HangProbeTimeout))
+        {
+            quarantine.RecordHang(now, _options);
+            pass.Outcomes[index] = PlacementOutcome.QuarantinedHung(windowId);
+            return true;
+        }
+
+        quarantine.RecordResponsive();
+        return false;
     }
 
     /// <summary>DESIGN.md §3.6b: restore directly into the tile, never restore-then-move.</summary>
     private void ApplyStateNormalization(
-        WindowId windowId,
-        HWND hwnd,
-        Rect requestedTarget,
-        Rect correctedTarget,
-        WindowPlacementState state,
-        ApplyPass pass,
-        ImmutableArray<PlacementOutcome>.Builder outcomes)
+        int index, WindowId windowId, HWND hwnd, Rect requestedTarget, Rect correctedTarget, WindowPlacementState state, ApplyPass pass)
     {
         Rect placementTarget = state.IsToolWindow
             ? correctedTarget
             : PlacementCoordinateConverter.ToWorkspaceCoordinates(correctedTarget, pass.PrimaryWorkArea);
 
         PlacementCallResult result = system.ApplyWindowPlacement(hwnd, placementTarget);
-        PlacementOutcome outcome = FinalizeMoveOutcome(windowId, hwnd, requestedTarget, result);
-        pass.AnyClamped |= outcome.ClampedTo is not null;
-        outcomes.Add(outcome);
+        if (!result.Success)
+        {
+            pass.Outcomes[index] = PlacementOutcome.Failed(windowId, result.ErrorCode);
+            return;
+        }
+
+        // Succeeded, but this call always sets WPF_ASYNCWINDOWPLACEMENT -- defer verification until
+        // after ApplyAsync's pass-wide settle wait (see this type's remarks).
+        pass.PendingVerifications.Add(new PendingVerification(index, windowId, hwnd, requestedTarget));
     }
 
-    private void ApplyPerWindowFallbacks(ApplyPass pass, ImmutableArray<PlacementOutcome>.Builder outcomes)
+    private void IssuePerWindowFallbacks(ApplyPass pass)
     {
         foreach (BatchCandidate candidate in pass.PerWindowFallback)
         {
             PlacementCallResult result = system.ApplyWindowPosFallback(candidate.Hwnd, candidate.CorrectedTarget);
-            PlacementOutcome outcome = FinalizeMoveOutcome(candidate.WindowId, candidate.Hwnd, candidate.OriginalTarget, result);
-            pass.AnyClamped |= outcome.ClampedTo is not null;
-            outcomes.Add(outcome);
+            if (!result.Success)
+            {
+                pass.Outcomes[candidate.Index] = PlacementOutcome.Failed(candidate.WindowId, result.ErrorCode);
+                continue;
+            }
+
+            // Succeeded, but this call always sets SWP_ASYNCWINDOWPOS -- defer verification (see
+            // this type's remarks), exactly like the state-normalization path.
+            pass.PendingVerifications.Add(new PendingVerification(candidate.Index, candidate.WindowId, candidate.Hwnd, candidate.OriginalTarget));
         }
     }
 
@@ -239,12 +293,12 @@ internal sealed class PlacementExecutor(
     }
 
     /// <summary>
-    /// Attempts the whole <paramref name="candidates"/> batch. On success, appends one
-    /// <see cref="PlacementOutcome"/> per candidate (verified) to <paramref name="outcomes"/> and
-    /// returns <see langword="true"/>. On failure, appends nothing — the caller redoes every
+    /// Attempts the whole <paramref name="candidates"/> batch. On success, writes one verified
+    /// <see cref="PlacementOutcome"/> per candidate into its own <c>pass.Outcomes</c> slot and
+    /// returns <see langword="true"/>. On failure, writes nothing — the caller redoes every
     /// candidate via the per-window fallback instead.
     /// </summary>
-    private bool TryApplyBatch(List<BatchCandidate> candidates, ImmutableArray<PlacementOutcome>.Builder outcomes, ApplyPass pass)
+    private bool TryApplyBatch(List<BatchCandidate> candidates, ApplyPass pass)
     {
         // DESIGN.md §3.6d / docs/engineering/concurrency-performance.md §3: scoped tightly around
         // the Defer batch only, restored immediately after in a finally -- never left set, never
@@ -268,9 +322,12 @@ internal sealed class PlacementExecutor(
 
         foreach (BatchCandidate candidate in candidates)
         {
-            PlacementOutcome outcome = FinalizeMoveOutcome(candidate.WindowId, candidate.Hwnd, candidate.OriginalTarget, PlacementCallResult.Ok);
+            // EndDeferWindowPos here carries no SWP_ASYNCWINDOWPOS and sends synchronously
+            // (DESIGN.md §3.6d) -- unlike the async-flagged paths, no settle wait is needed before
+            // verifying.
+            PlacementOutcome outcome = FinalizeVerifiedMove(candidate.WindowId, candidate.Hwnd, candidate.OriginalTarget);
             pass.AnyClamped |= outcome.ClampedTo is not null;
-            outcomes.Add(outcome);
+            pass.Outcomes[candidate.Index] = outcome;
         }
 
         return true;
@@ -299,14 +356,22 @@ internal sealed class PlacementExecutor(
         return system.EndDefer(batch);
     }
 
-    /// <summary>Verify-after-move (DESIGN.md §3.6e) for one window whose apply call already ran.</summary>
-    private PlacementOutcome FinalizeMoveOutcome(WindowId windowId, HWND hwnd, Rect requestedTarget, PlacementCallResult applyResult)
+    /// <summary>Verify-after-move (DESIGN.md §3.6e) for every window deferred behind the pass-wide async settle wait.</summary>
+    private void FinalizeVerifications(ApplyPass pass)
     {
-        if (!applyResult.Success)
+        foreach (PendingVerification pending in pass.PendingVerifications)
         {
-            return PlacementOutcome.Failed(windowId, applyResult.ErrorCode);
+            PlacementOutcome outcome = FinalizeVerifiedMove(pending.WindowId, pending.Hwnd, pending.RequestedTarget);
+            pass.AnyClamped |= outcome.ClampedTo is not null;
+            pass.Outcomes[pending.Index] = outcome;
         }
+    }
 
+    /// <summary>
+    /// Reads back and clamp-checks one window whose apply call is already known to have succeeded.
+    /// </summary>
+    private PlacementOutcome FinalizeVerifiedMove(WindowId windowId, HWND hwnd, Rect requestedTarget)
+    {
         if (!system.TryReadGeometry(hwnd, out _, out Rect verifiedBounds))
         {
             // Vanished between the move and this verify read -- a routine race, not exceptional
@@ -322,22 +387,31 @@ internal sealed class PlacementExecutor(
         return PlacementOutcome.Moved(windowId, verifiedBounds, clampedTo);
     }
 
-    /// <summary>One window queued for either the Defer batch or the per-window fallback.</summary>
+    /// <summary>One window queued for either the Defer batch or the per-window fallback, keyed by its original plan index.</summary>
     [StructLayout(LayoutKind.Auto)]
-    private readonly record struct BatchCandidate(WindowId WindowId, HWND Hwnd, Rect OriginalTarget, Rect CorrectedTarget);
+    private readonly record struct BatchCandidate(int Index, WindowId WindowId, HWND Hwnd, Rect OriginalTarget, Rect CorrectedTarget);
+
+    /// <summary>One window whose async-flagged apply call succeeded and is awaiting the pass-wide settle wait before verification, keyed by its original plan index.</summary>
+    [StructLayout(LayoutKind.Auto)]
+    private readonly record struct PendingVerification(int Index, WindowId WindowId, HWND Hwnd, Rect RequestedTarget);
 
     /// <summary>
-    /// Mutable, per-<see cref="Apply"/>-call working state: the primary work area (queried once),
-    /// the batch/fallback queues <see cref="ProcessInstruction"/> fills in, and the
-    /// clamp-detected-anywhere-this-pass flag.
+    /// Mutable, per-<see cref="ApplyAsync"/>-call working state: the primary work area (queried
+    /// once), each instruction's reserved outcome slot (preserving plan order regardless of which
+    /// phase resolves it), the batch/fallback/pending-verification queues
+    /// <see cref="ProcessInstruction"/> fills in, and the clamp-detected-anywhere-this-pass flag.
     /// </summary>
-    private sealed class ApplyPass(Rect primaryWorkArea)
+    private sealed class ApplyPass(Rect primaryWorkArea, int instructionCount)
     {
         public Rect PrimaryWorkArea { get; } = primaryWorkArea;
+
+        public PlacementOutcome[] Outcomes { get; } = new PlacementOutcome[instructionCount];
 
         public List<BatchCandidate> Batchable { get; } = [];
 
         public List<BatchCandidate> PerWindowFallback { get; } = [];
+
+        public List<PendingVerification> PendingVerifications { get; } = [];
 
         public bool AnyClamped { get; set; }
     }

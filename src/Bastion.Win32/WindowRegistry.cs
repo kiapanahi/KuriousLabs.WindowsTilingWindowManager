@@ -184,11 +184,47 @@ internal sealed class WindowRegistry(
     /// <c>HWND</c> cross into <c>Bastion.Core</c> (DESIGN.md §3, §10). Returns
     /// <see langword="false"/> if the window has since been purged (vanished).
     /// </summary>
+    /// <remarks>
+    /// <b>Revalidates the live PID before handing back the HWND (Codex review finding on this
+    /// PR).</b> A caller of this method — unlike <see cref="TryAdmitAsync"/>'s own callers — never
+    /// re-runs the manageability filter or otherwise re-triggers HWND-recycling detection first: the
+    /// Placement Executor calls this directly, on its own schedule, independent of any WinEvent. If
+    /// the OS recycles <paramref name="windowId"/>'s HWND to an unrelated window while this window's
+    /// own <c>EVENT_OBJECT_DESTROY</c> is still only queued (<see cref="Purge"/> not yet called),
+    /// returning the stale mapping unchecked would hand the caller an HWND that now identifies a
+    /// completely different window — this method applies the same live-PID recheck
+    /// <see cref="TryFindExistingUnderLock"/> already performs for the forward (HWND → entry)
+    /// direction, evicting both index entries on a mismatch rather than trusting the mapping blindly.
+    /// </remarks>
     public bool TryGetHwnd(WindowId windowId, out HWND hwnd)
     {
         lock (_lock)
         {
-            return _hwndsByWindowId.TryGetValue(windowId, out hwnd);
+            if (!_hwndsByWindowId.TryGetValue(windowId, out hwnd))
+            {
+                return false;
+            }
+
+            if (!_entriesByHwnd.TryGetValue(hwnd, out WindowRegistryEntry? entry) || entry.WindowId != windowId)
+            {
+                // Already evicted/replaced by some other path under this same lock -- treat as gone.
+                hwnd = default;
+                return false;
+            }
+
+            if (pidReader.TryReadProcessId(hwnd) != entry.Pid)
+            {
+                // Recycled since this entry was minted, with no DESTROY/Purge yet -- evict both
+                // sides of the now-stale mapping (the same correction TryFindExistingUnderLock
+                // performs for the forward direction) rather than returning an HWND that no longer
+                // identifies the window this WindowId was minted for.
+                _entriesByHwnd.Remove(hwnd);
+                _hwndsByWindowId.Remove(windowId);
+                hwnd = default;
+                return false;
+            }
+
+            return true;
         }
     }
 
