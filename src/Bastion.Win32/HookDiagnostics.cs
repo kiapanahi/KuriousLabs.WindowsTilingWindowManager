@@ -30,30 +30,33 @@ internal static class HookDiagnostics
             "that range will not be monitored.");
 
     /// <summary>
-    /// Logs an unexpected <c>GetMessage</c> failure (a -1 return) on the WinEvent pump thread's
-    /// message loop. <c>GetMessage</c>'s own docs warn against the naive 0/nonzero check for
-    /// exactly this reason; this pump implements the correct 3-way check but always passes a null
-    /// <c>hWnd</c> filter, so the documented invalid-window-handle trigger for -1 should not occur
-    /// in practice — this sink exists so a genuine occurrence is observable rather than silent.
+    /// Logs an unexpected <c>GetMessage</c> failure (a -1 return) on <paramref name="pumpName"/>'s
+    /// message loop — shared by every <c>GetMessage</c>/<c>DispatchMessage</c>-loop pump in this
+    /// assembly (<see cref="WinEventPumpService"/>, <see cref="InputPumpService"/>), never
+    /// hardcoded to one. <c>GetMessage</c>'s own docs warn against the naive 0/nonzero check for
+    /// exactly this reason; every one of these pumps implements the correct 3-way check but always
+    /// passes a null <c>hWnd</c> filter, so the documented invalid-window-handle trigger for -1
+    /// should not occur in practice — this sink exists so a genuine occurrence is observable rather
+    /// than silent.
     /// </summary>
-    public static void LogMessageLoopFault() =>
-        Console.Error.WriteLine(
-            "[Bastion.Win32] WinEvent pump's GetMessage loop returned -1 (error); exiting the pump loop.");
+    public static void LogMessageLoopFault(string pumpName) =>
+        Console.Error.WriteLine($"[Bastion.Win32] {pumpName}'s GetMessage loop returned -1 (error); exiting the pump loop.");
 
     /// <summary>
-    /// Logs a failed <c>PostThreadMessage(WM_QUIT)</c> call from <c>StopAsync</c> — per its own
-    /// documented failure modes, the pump thread's message queue may not exist yet, the thread id
-    /// may already be stale, a UIPI integrity-level check may have blocked it, or the per-queue
-    /// message quota may have been hit. Not immediately fatal on its own: <c>StopAsync</c>'s
-    /// bounded <c>Thread.Join</c> still turns a pump that never receives <c>WM_QUIT</c> into an
-    /// observable <see cref="TimeoutException"/> rather than a silent hang, but a genuine
-    /// occurrence of this specific failure should be visible rather than discarded (the call site
-    /// previously ignored this return value outright).
+    /// Logs a failed <c>PostThreadMessage(WM_QUIT)</c> call from <paramref name="pumpName"/>'s
+    /// <c>StopAsync</c> — shared by every pump-thread <c>IHostedService</c> in this assembly, never
+    /// hardcoded to one. Per <c>PostThreadMessage</c>'s own documented failure modes, the pump
+    /// thread's message queue may not exist yet, the thread id may already be stale, a UIPI
+    /// integrity-level check may have blocked it, or the per-queue message quota may have been hit.
+    /// Not immediately fatal on its own: <c>StopAsync</c>'s bounded <c>Thread.Join</c> still turns a
+    /// pump that never receives <c>WM_QUIT</c> into an observable <see cref="TimeoutException"/>
+    /// rather than a silent hang, but a genuine occurrence of this specific failure should be
+    /// visible rather than discarded.
     /// </summary>
-    public static void LogPostQuitMessageFailed(uint threadId) =>
+    public static void LogPostQuitMessageFailed(uint threadId, string pumpName) =>
         Console.Error.WriteLine(
-            $"[Bastion.Win32] PostThreadMessage(WM_QUIT) to thread {threadId} failed; the WinEvent " +
-            "pump may not exit until StopAsync's join timeout.");
+            $"[Bastion.Win32] PostThreadMessage(WM_QUIT) to thread {threadId} failed; the {pumpName} " +
+            "may not exit until StopAsync's join timeout.");
 
     /// <summary>
     /// Logs a hook that failed to unregister via <c>UnhookWinEvent</c>. Per

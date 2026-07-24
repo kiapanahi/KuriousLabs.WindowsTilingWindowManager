@@ -144,7 +144,7 @@ internal sealed class InputPumpService : IHostedService, IDisposable
                 // Not immediately fatal — the bounded Join below still turns a pump that misses
                 // WM_QUIT into an observable TimeoutException rather than a silent hang — but a
                 // genuine occurrence of this documented failure should be visible, not discarded.
-                HookDiagnostics.LogPostQuitMessageFailed(_pumpThreadId);
+                HookDiagnostics.LogPostQuitMessageFailed(_pumpThreadId, "Input pump");
             }
         }
 
@@ -222,7 +222,7 @@ internal sealed class InputPumpService : IHostedService, IDisposable
                     // Unexpected: this pump always passes a null hWnd filter, so the documented
                     // invalid-window-handle trigger for -1 should not occur in practice — exit rather
                     // than spin forever on a persistent error, per GetMessage's own docs.
-                    HookDiagnostics.LogMessageLoopFault();
+                    HookDiagnostics.LogMessageLoopFault("Input pump");
                     return;
                 default:
                     if (message.message == PInvoke.WM_HOTKEY)
@@ -246,9 +246,10 @@ internal sealed class InputPumpService : IHostedService, IDisposable
     {
         // WM_HOTKEY's wParam carries the RegisterHotKey id that fired
         // (https://learn.microsoft.com/windows/win32/inputdev/wm-hotkey). WPARAM's implicit nuint
-        // conversion, then a narrowing cast to int, mirrors every id this pump itself minted
-        // (always in [1, DefaultHotkeyBindings.All.Length], well within RegisterHotKey's documented
-        // 0x0000-0xBFFF application range).
+        // conversion, then a narrowing cast to int, is safe because RegisterHotKey's own documented
+        // contract limits every application id to the range 0x0000-0xBFFF -- comfortably inside
+        // int's range -- regardless of whether DefaultHotkeyBindings.All's own ids stay sequential
+        // in the future.
         int id = (int)(nuint)message.wParam;
         if (HotkeyDispatch.TryResolveCommand(_registrationResults, id, out HotkeyCommand command))
         {
