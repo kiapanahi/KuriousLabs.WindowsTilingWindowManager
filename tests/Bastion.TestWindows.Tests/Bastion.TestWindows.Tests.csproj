@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Matches Bastion.TestWindows.csproj's own TFM: a project referencing it cannot target a
+         lower TargetPlatformVersion than it does (NU1201). Unlike Bastion.Win32.Tests, no explicit
+         Windows SDK version pin is needed here — Bastion.TestWindows.csproj itself doesn't set one. -->
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>Bastion.TestWindows.Tests</RootNamespace>
+    <AssemblyName>Bastion.TestWindows.Tests</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      No own NativeMethods.txt/json: this project exercises only TestWindowOptions.Parse, which has
+      zero CsWin32/Win32 dependency of its own, via InternalsVisibleTo
+      (src/Bastion.TestWindows/Properties/AssemblyInfo.cs) — it does not regenerate any CsWin32
+      bindings. TestWindowSpawner.Run/WndProc/WatchStdinForShutdownSignal (the actually Win32-
+      touching half of this project) need a live desktop session and are exercised only by the
+      not-yet-built Tier 3 harness (DESIGN.md §11), not this project.
+    -->
+    <ProjectReference Include="..\..\src\Bastion.TestWindows\Bastion.TestWindows.csproj" />
+    <PackageReference Include="xunit.v3.mtp-v2" />
+    <PackageReference Include="Microsoft.Testing.Extensions.CodeCoverage" />
+  </ItemGroup>
+
+</Project>
