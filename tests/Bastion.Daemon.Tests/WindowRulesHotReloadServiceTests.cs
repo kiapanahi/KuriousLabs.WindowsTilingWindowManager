@@ -154,6 +154,24 @@ public sealed class WindowRulesHotReloadServiceTests : IDisposable
         Assert.Equal(0, _notifier.SucceededCallCount);
     }
 
+    [Fact]
+    public async Task DisposeWithoutStopAsyncAlsoPreventsFurtherReloads()
+    {
+        // Regression test (caught in review): a host that fails during startup can dispose
+        // already-constructed singletons without ever calling StopAsync on them, so Dispose alone
+        // must independently guarantee "no further reload/publish," not just StopAsync.
+        await WriteShippedRuleAsync("a", WindowRuleAction.Ignore);
+        WindowRulesHotReloadService service = CreateService(rules: []);
+        await service.StartAsync(TestContext.Current.CancellationToken);
+
+        service.Dispose();
+
+        _watcher.RaiseChanged();
+        _time.Advance(s_debounce);
+
+        Assert.Equal(0, _notifier.SucceededCallCount);
+    }
+
     private WindowRulesHotReloadService CreateService(System.Collections.Immutable.ImmutableArray<WindowRule> rules) =>
         CreateService(CreatePublished(rules));
 

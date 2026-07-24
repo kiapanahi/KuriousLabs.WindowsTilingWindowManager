@@ -217,10 +217,19 @@ internal sealed class WindowRulesHotReloadService : IHostedService, IDisposable
     /// <inheritdoc/>
     public void Dispose()
     {
+        // Mirrors StopAsync exactly (including setting _stopped, not just disposing the timer):
+        // a host that fails during startup can dispose already-constructed singletons without ever
+        // calling StopAsync on them, and a queued callback can still fire after this Dispose call
+        // per the timer-outlives-dispose race this type's remarks already describe -- Dispose is
+        // not guaranteed to be preceded by StopAsync, so it must independently guarantee the same
+        // "no further reload/publish" outcome (caught in review).
         _watcher.Changed -= OnDirectoryChanged;
+        _watcher.Stop();
         lock (_gate)
         {
+            _stopped = true;
             _debounceTimer?.Dispose();
+            _debounceTimer = null;
         }
     }
 }
