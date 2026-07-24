@@ -23,6 +23,16 @@
     <ProjectReference Include="..\Bastion.Layout\Bastion.Layout.csproj" />
     <ProjectReference Include="..\Bastion.Win32\Bastion.Win32.csproj" />
     <PackageReference Include="Microsoft.Extensions.Hosting" />
+
+    <!--
+      GitHub issue #9: [OptionsValidator]/[ValidateEnumeratedItems]/AddOptionsWithValidateOnStart
+      (docs/engineering/daemon-architecture.md §4). Referenced directly (not left to incidental
+      transitive availability via Microsoft.Extensions.Hosting) since this project depends on the
+      OptionsValidator source generator directly, per learn.microsoft.com/dotnet/core/extensions/options-validation-generator:
+      "automatically enabled by default when your project references Microsoft.Extensions.Options
+      version 8 or later."
+    -->
+    <PackageReference Include="Microsoft.Extensions.Options" />
   </ItemGroup>
 
   <!--
@@ -31,6 +41,18 @@
   -->
   <ItemGroup>
     <PackageReference Include="Microsoft.VisualStudio.Threading.Analyzers" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!--
+    GitHub issue #9: the shipped curated rules seed (docs/engineering/json-ipc-config.md §2,
+    DESIGN.md §9) ships next to bastiond.exe, versioned with the binary rather than copied into the
+    user's profile on first run (WindowRulesConfigPaths' own remarks explain why). `Update`, not
+    `Include`: the file already matches the SDK's default `**\*` None-item glob, so `Include` here
+    would register a duplicate item (NETSDK1022); this only attaches CopyToOutputDirectory
+    metadata to the already-globbed item.
+  -->
+  <ItemGroup>
+    <None Update="rules.default.jsonc" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

@@ -45,6 +45,14 @@
     -->
     <PackageVersion Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.10" />
 
+    <!--
+      GitHub issue #9: Bastion.Daemon's JSONC config-loading subsystem — [OptionsValidator]/
+      [ValidateEnumeratedItems]/AddOptionsWithValidateOnStart (docs/engineering/daemon-architecture.md
+      §4). Pinned to the same 10.0.10 build Microsoft.Extensions.Hosting 10.0.10 itself depends on,
+      so CentralPackageTransitivePinningEnabled has nothing to reconcile between the two references.
+    -->
+    <PackageVersion Include="Microsoft.Extensions.Options" Version="10.0.10" />
+
     <!-- CLI argument parsing (Bastion.Cli) -->
     <PackageVersion Include="System.CommandLine" Version="2.0.10" />
 
