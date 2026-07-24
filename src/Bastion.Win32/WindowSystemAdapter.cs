@@ -72,24 +72,52 @@ internal sealed class WindowSystemAdapter(WindowRegistry registry, ICloakStateRe
                 continue;
             }
 
-            builder.Add(ReadObservedWindow(id, hwnd));
+            if (TryReadObservedWindow(id, hwnd, out ObservedWindow observedWindow))
+            {
+                builder.Add(observedWindow);
+            }
         }
 
         return builder.ToImmutable();
     }
 
-    private ObservedWindow ReadObservedWindow(WindowId windowId, HWND hwnd)
+    /// <summary>
+    /// Reads <paramref name="hwnd"/>'s geometry/state into <paramref name="observedWindow"/>.
+    /// Returns <see langword="false"/> (and <paramref name="observedWindow"/> is
+    /// <see langword="default"/>) if <c>GetWindowRect</c> itself fails — e.g. the window was
+    /// destroyed between enumeration/admission and this call, a routine race, not exceptional
+    /// (matching <see cref="WindowProbe.TryGetBounds"/>'s own doc remarks). This window is skipped
+    /// entirely for this tick rather than reported with degenerate <c>(0,0,0,0)</c> bounds, which
+    /// would otherwise drive a spurious <see cref="PlacementAction.Move"/>/<see cref="PlacementAction.Untile"/>
+    /// decision for a window that is already gone (Copilot review finding on this PR) — the next
+    /// convergence pass naturally forgets it once <c>EnumWindows</c> stops reporting it at all.
+    /// </summary>
+    /// <remarks>
+    /// DOCUMENTED CONTRACT for <c>IsIconic</c>/<c>IsZoomed</c> (verified against
+    /// https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-isiconic and
+    /// https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-iszoomed): "Determines
+    /// whether the specified window is minimized"/"whether a window is maximized" — a nonzero
+    /// <c>BOOL</c> when true, zero otherwise. Neither documents a distinct failure mode for an
+    /// already-destroyed handle the way <c>GetWindowRect</c>/<c>DwmGetWindowAttribute</c> do, so no
+    /// separate fallback handling applies to these two calls specifically.
+    /// </remarks>
+    private bool TryReadObservedWindow(WindowId windowId, HWND hwnd, out ObservedWindow observedWindow)
     {
-        _ = WindowProbe.TryGetBounds(hwnd, out RECT windowRect);
-        RECT frameBoundsRect = TryGetExtendedFrameBounds(hwnd, fallback: windowRect);
+        if (!WindowProbe.TryGetBounds(hwnd, out RECT windowRect))
+        {
+            observedWindow = default;
+            return false;
+        }
 
-        return new ObservedWindow(
+        RECT frameBoundsRect = TryGetExtendedFrameBounds(hwnd, fallback: windowRect);
+        observedWindow = new ObservedWindow(
             windowId,
             ToRect(frameBoundsRect),
             ToRect(windowRect),
             IsCloaked: cloakStateReader.IsCloaked(hwnd),
             IsIconic: PInvoke.IsIconic(hwnd),
             IsZoomed: PInvoke.IsZoomed(hwnd));
+        return true;
     }
 
     /// <summary>

@@ -7,7 +7,7 @@ namespace Bastion.Core;
 /// boundary (DESIGN.md §3.6): this is a <em>plan</em>, never executed here. The Placement Executor
 /// (GitHub issue #5) is the sole consumer that turns <see cref="Move"/> instructions into
 /// <c>SetWindowPos</c>/<c>DeferWindowPos</c> calls (with its own border-delta/coordinate-space
-/// translation, hang-probe, and verify-after-move machinery) and <see cref="Float"/> instructions
+/// translation, hang-probe, and verify-after-move machinery) and <see cref="Untile"/> instructions
 /// into simply leaving the window alone.
 /// </summary>
 /// <param name="WindowId">The window this instruction concerns.</param>

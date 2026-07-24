@@ -11,7 +11,7 @@ namespace Bastion.Core;
 public sealed record ReconcilerOptions
 {
     /// <summary>
-    /// The 5 s full-resync cadence (DESIGN.md §3.4) driving <see cref="Reconciler.RunHeartbeatLoopAsync"/>'s
+    /// The 5 s full-resync cadence (DESIGN.md §3.4) driving <see cref="Reconciler.RunAsync"/>'s
     /// <see cref="PeriodicTimer"/>.
     /// </summary>
     public TimeSpan HeartbeatInterval { get; init; } = TimeSpan.FromSeconds(5);
@@ -30,7 +30,7 @@ public sealed record ReconcilerOptions
     /// <summary>
     /// How many device pixels of difference between a desired and observed rect edge are treated
     /// as "already converged" rather than needing a <see cref="PlacementAction.Move"/> instruction.
-    /// Needed because <see cref="Bastion.Layout.ILayoutEngine"/> solves in exact, fractional
+    /// Needed because <see cref="ILayoutEngine"/> solves in exact, fractional
     /// <see cref="double"/> coordinates (DESIGN.md §6) while observed frame bounds are always
     /// whole device pixels — without tolerance, a perfectly-settled window would be re-asserted
     /// (and consume its reassert budget) on every single convergence pass.
