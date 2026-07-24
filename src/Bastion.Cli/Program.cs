@@ -18,8 +18,9 @@ RootCommand rootCommand = new("bastionc — thin IPC client for bastiond. See DE
 // System.CommandLine's own (undocumented) default resolution for its built-in --version option —
 // that way this doesn't silently change if a future System.CommandLine version alters what its
 // default reads.
-VersionOption versionOption = rootCommand.Options.OfType<VersionOption>().Single();
+VersionOption versionOption = rootCommand.Options.OfType<VersionOption>().SingleOrDefault() ?? new VersionOption();
 versionOption.Action = new PrintAssemblyVersionAction();
+if (!rootCommand.Options.Contains(versionOption)) rootCommand.Options.Add(versionOption);
 
 Command statusCommand = new("status", "Query the daemon's current window/monitor topology.");
 statusCommand.SetAction(_ => NotYetImplemented("status"));
