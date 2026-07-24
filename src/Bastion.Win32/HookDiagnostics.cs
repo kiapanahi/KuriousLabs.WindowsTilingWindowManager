@@ -111,4 +111,14 @@ internal static class HookDiagnostics
     /// </summary>
     public static void LogHotkeyInvoked(HotkeyCommand command) =>
         Console.Error.WriteLine($"[Bastion.Win32] hotkey invoked: {command}.");
+
+    /// <summary>
+    /// Logs an exception thrown by an <see cref="IHotkeyDispatchTarget"/> while handling
+    /// <paramref name="command"/>. Contained here rather than left to propagate — see
+    /// <see cref="HotkeyDispatch.InvokeSafely"/>'s remarks for why an unhandled exception on the
+    /// input pump's raw dedicated thread would otherwise terminate the whole <c>bastiond</c>
+    /// process.
+    /// </summary>
+    public static void LogHotkeyDispatchFault(HotkeyCommand command, Exception exception) =>
+        Console.Error.WriteLine($"[Bastion.Win32] hotkey dispatch fault for command {command}: {exception}");
 }

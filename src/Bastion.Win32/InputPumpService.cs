@@ -252,7 +252,10 @@ internal sealed class InputPumpService : IHostedService, IDisposable
         int id = (int)(nuint)message.wParam;
         if (HotkeyDispatch.TryResolveCommand(_registrationResults, id, out HotkeyCommand command))
         {
-            _dispatchTarget.OnHotkeyInvoked(command);
+            // Never call _dispatchTarget.OnHotkeyInvoked directly here — HotkeyDispatch.InvokeSafely
+            // is the mandatory crash-containment boundary; see its own remarks for why an escaping
+            // exception on this raw dedicated thread would otherwise kill the whole daemon process.
+            HotkeyDispatch.InvokeSafely(_dispatchTarget, command);
         }
     }
 }

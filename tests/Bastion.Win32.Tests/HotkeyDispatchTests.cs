@@ -51,4 +51,30 @@ public sealed class HotkeyDispatchTests
 
         Assert.False(found);
     }
+
+    [Fact]
+    public void InvokeSafelyInvokesTheDispatchTargetForTheCommand()
+    {
+        var target = new FakeHotkeyDispatchTarget();
+
+        HotkeyDispatch.InvokeSafely(target, HotkeyCommand.FocusLeft);
+
+        Assert.Equal([HotkeyCommand.FocusLeft], target.InvokedCommands);
+    }
+
+    [Fact]
+    public void InvokeSafelyContainsAnExceptionThrownByTheDispatchTarget()
+    {
+        // Codex PR review finding on this issue: an exception from a future Reconciler-driven
+        // command implementation must never escape InputPumpService's raw dedicated pump thread —
+        // docs/engineering/daemon-architecture.md §6's must-not-die policy — so InvokeSafely must
+        // swallow it (after logging) rather than let it propagate to this test as an exception.
+        var target = new FakeHotkeyDispatchTarget { ExceptionToThrow = new InvalidOperationException("boom") };
+
+        HotkeyDispatch.InvokeSafely(target, HotkeyCommand.FocusLeft);
+
+        // No assertion beyond "this line was reached without HotkeyDispatch.InvokeSafely rethrowing"
+        // is needed — if containment regresses, the exception above propagates out of this test
+        // method and xUnit reports it as a failure.
+    }
 }

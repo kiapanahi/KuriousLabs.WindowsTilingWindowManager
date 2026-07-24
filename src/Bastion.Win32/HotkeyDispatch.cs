@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Diagnostics.CodeAnalysis;
 
 namespace Bastion.Win32;
 
@@ -44,5 +45,41 @@ internal static class HotkeyDispatch
 
         command = default;
         return false;
+    }
+
+    /// <summary>
+    /// Invokes <paramref name="dispatchTarget"/> for <paramref name="command"/>, containing any
+    /// exception it throws rather than letting it propagate.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="IHotkeyDispatchTarget"/> is a seam a future Reconciler-driven command
+    /// implementation will replace (GitHub issue #10); <see cref="LoggingHotkeyDispatchTarget"/>
+    /// never throws today, but nothing about the interface's contract promises that of every future
+    /// implementation. An exception here runs on <see cref="InputPumpService"/>'s raw dedicated
+    /// foreground thread — not a <see cref="System.Threading.Tasks.Task"/> — so letting it escape
+    /// would terminate the entire <c>bastiond</c> process by default
+    /// (docs/engineering/daemon-architecture.md §6's must-not-die policy), a wildly disproportionate
+    /// consequence for one misbehaving command handler. Logged and contained instead, so the pump
+    /// keeps processing subsequent hotkeys — the same posture <c>WinEventPumpService.OnWinEvent</c>'s
+    /// own mandatory catch-all takes for the WinEvent pump, applied here to a managed dependency
+    /// boundary rather than a native one.
+    /// </remarks>
+    [SuppressMessage(
+        "Design",
+        "CA1031:Do not catch general exception types",
+        Justification = "Deliberate crash-containment boundary for a raw dedicated pump thread, " +
+            "not a native callback: see this method's own remarks and " +
+            "docs/engineering/daemon-architecture.md §6. Matches WinEventPumpService.OnWinEvent's " +
+            "own mandatory catch-all rationale.")]
+    public static void InvokeSafely(IHotkeyDispatchTarget dispatchTarget, HotkeyCommand command)
+    {
+        try
+        {
+            dispatchTarget.OnHotkeyInvoked(command);
+        }
+        catch (Exception ex)
+        {
+            HookDiagnostics.LogHotkeyDispatchFault(command, ex);
+        }
     }
 }
