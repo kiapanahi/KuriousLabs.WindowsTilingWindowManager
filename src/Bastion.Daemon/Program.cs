@@ -1,5 +1,8 @@
+using System.Reflection;
 using Bastion.Daemon;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 
 // Single-instance enforcement (GitHub issue #10, docs/engineering/daemon-architecture.md §7) --
 // must run, and must exit cleanly if another instance already owns it, before any hosted service
@@ -52,4 +55,14 @@ builder.Services.AddBastionMonitorTopologyStub();
 // service. This is the slot issue #12 fills.
 
 using IHost host = builder.Build();
+
+// GitHub issue #48/PR #49: log the MinVer-derived running version once the host (and therefore
+// real ILogger-based logging) is up, ahead of every hosted service's own startup messages -- the
+// equivalent of the deleted BastiondService's identical startup-version log. Read the identical
+// way bastionc's own PrintAssemblyVersionAction does, rather than leaning on any framework default.
+string version = Assembly.GetExecutingAssembly()
+    .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+    ?? "unknown";
+host.Services.GetRequiredService<ILogger<Program>>().DaemonStarting(version);
+
 await host.RunAsync().ConfigureAwait(false);
