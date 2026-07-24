@@ -80,6 +80,59 @@ public sealed class HookDiagnosticsTests
         Assert.Throws<ArgumentNullException>(() => HookDiagnostics.Initialize(null!));
     }
 
+    [Fact]
+    public void InitializeThrowsIfAlreadyInitialized()
+    {
+        // Codex/Copilot PR review finding: a second Initialize call must not silently overwrite the
+        // logger -- that would make LogCallbackFault's choice of logger non-deterministic depending
+        // on call order, for no legitimate reason (production has exactly one composition root and
+        // therefore exactly one legitimate caller).
+        HookDiagnostics.ResetForTesting();
+
+        try
+        {
+            HookDiagnostics.Initialize(new FakeLogger());
+
+            Assert.Throws<InvalidOperationException>(() => HookDiagnostics.Initialize(new FakeLogger()));
+        }
+        finally
+        {
+            HookDiagnostics.ResetForTesting();
+        }
+    }
+
+    [Fact]
+    public void LogCallbackFaultNeverThrowsWhenTheExceptionsOwnToStringThrows()
+    {
+        // Codex/Copilot PR review finding: LogCallbackFault's Console.Error fallback interpolates
+        // the exception, which calls the exception's own ToString() implicitly -- a pathological
+        // override must not escape LogCallbackFault either. No logger initialized, so this exercises
+        // WriteFallback via the "logger is null" branch specifically.
+        HookDiagnostics.ResetForTesting();
+
+        HookDiagnostics.LogCallbackFault(new ToStringThrowsException());
+    }
+
+    [Fact]
+    public void LogCallbackFaultNeverThrowsWhenBothTheLoggerAndTheExceptionsToStringFault()
+    {
+        // The doubly-defensive case: LogCallbackFaultCore throws (ThrowingLogger), which routes to
+        // WriteFallback from LogCallbackFault's own catch block -- and WriteFallback's own attempt to
+        // render the exception then faults too (ToStringThrowsException). Nothing should escape even
+        // when every layer of the fallback chain fails simultaneously.
+        HookDiagnostics.ResetForTesting();
+
+        try
+        {
+            HookDiagnostics.Initialize(new ThrowingLogger());
+            HookDiagnostics.LogCallbackFault(new ToStringThrowsException());
+        }
+        finally
+        {
+            HookDiagnostics.ResetForTesting();
+        }
+    }
+
     /// <summary>A minimal <see cref="ILogger"/> that always faults, simulating a broken logging provider.</summary>
     private sealed class ThrowingLogger : ILogger
     {
@@ -89,5 +142,25 @@ public sealed class HookDiagnosticsTests
 
         public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
             throw new InvalidOperationException("simulated faulting logging provider");
+    }
+
+    /// <summary>An exception whose own <see cref="ToString"/> faults, simulating a pathological override.</summary>
+    private sealed class ToStringThrowsException : Exception
+    {
+        public ToStringThrowsException()
+        {
+        }
+
+        public ToStringThrowsException(string message)
+            : base(message)
+        {
+        }
+
+        public ToStringThrowsException(string message, Exception innerException)
+            : base(message, innerException)
+        {
+        }
+
+        public override string ToString() => throw new InvalidOperationException("simulated faulting Exception.ToString()");
     }
 }

@@ -32,9 +32,10 @@ internal static partial class HookDiagnostics
 {
     // Written exactly once in production, by Bastion.Daemon's composition root (Program.cs), after
     // the host is built and before host.RunAsync() starts any hosted service that could fire a hook
-    // callback -- see Initialize's own remarks. Volatile.Write/Read (rather than a plain field
-    // read/write) make the intended cross-thread happens-before relationship explicit: the pump
-    // thread that later reads this field is never the thread that set it.
+    // callback -- see Initialize's own remarks. Interlocked.CompareExchange (rather than a plain
+    // Volatile.Write) both enforces the "exactly once" contract atomically and gives the same
+    // cross-thread happens-before guarantee a Volatile.Write would: the pump thread that later reads
+    // this field (via Volatile.Read, in LogCallbackFault) is never the thread that set it.
     private static ILogger? s_logger;
 
     /// <summary>
@@ -44,18 +45,36 @@ internal static partial class HookDiagnostics
     /// from inside a hook callback itself, so resolving <paramref name="logger"/> from DI beforehand
     /// is fine.
     /// </summary>
+    /// <exception cref="InvalidOperationException">
+    /// <see cref="Initialize(ILogger)"/> was already called once in this process (e.g. a second,
+    /// accidental call from another startup path). Enforced rather than silently overwritten: a
+    /// second call succeeding silently would make <see cref="LogCallbackFault(Exception)"/>'s
+    /// choice of logger non-deterministic depending on call order, for no legitimate reason —
+    /// production has exactly one composition root and therefore exactly one legitimate caller.
+    /// <see cref="ResetForTesting"/> is the only supported way to legitimately re-arm this for a
+    /// subsequent call, and exists solely for that purpose.
+    /// </exception>
     public static void Initialize(ILogger logger)
     {
         ArgumentNullException.ThrowIfNull(logger);
-        Volatile.Write(ref s_logger, logger);
+
+        if (Interlocked.CompareExchange(ref s_logger, logger, comparand: null) is not null)
+        {
+            throw new InvalidOperationException(
+                $"{nameof(HookDiagnostics)}.{nameof(Initialize)} must be called exactly once per " +
+                "process, by the composition root before any hook could fire -- it has already been " +
+                "initialized.");
+        }
     }
 
     /// <summary>
-    /// Test-only: restores the pre-<see cref="Initialize(ILogger)"/> state so a test exercising the
-    /// one-time handoff never leaks a fake logger into whichever test happens to run next in the same
-    /// process. Internal rather than <see langword="private"/> only so <c>Bastion.Win32.Tests</c>
-    /// (already granted access via this assembly's <c>InternalsVisibleTo</c>) can call it from a
-    /// <see langword="finally"/> block.
+    /// Test-only: restores the pre-<see cref="Initialize(ILogger)"/> state, re-arming it so a
+    /// subsequent call succeeds instead of throwing, and so a test exercising the one-time handoff
+    /// never leaks a fake logger into whichever test happens to run next in the same process.
+    /// Internal rather than <see langword="private"/> only so <c>Bastion.Win32.Tests</c> (already
+    /// granted access via this assembly's <c>InternalsVisibleTo</c>) can call it from a
+    /// <see langword="finally"/> block. Production has no legitimate reason to call this — the
+    /// composition root initializes exactly once and never resets.
     /// </summary>
     internal static void ResetForTesting() => Volatile.Write(ref s_logger, null);
 
@@ -68,12 +87,13 @@ internal static partial class HookDiagnostics
     /// run). See docs/engineering/interop.md §3.3.
     /// </summary>
     /// <remarks>
-    /// This method — and everything it calls — must never itself throw: it is invoked from inside the
-    /// exact mandatory catch-all that exists to guarantee no exception ever crosses the
-    /// <c>[UnmanagedCallersOnly]</c> native boundary undefined-behavior-style (interop.md §3.3). The
-    /// inner try/catch below is deliberate defense in depth against a hypothetical faulting
-    /// <see cref="ILogger"/> provider, not decoration — a provider throwing here would otherwise
-    /// become exactly the kind of escaping exception this whole mechanism exists to prevent.
+    /// This method — and everything it calls, including its own <see cref="WriteFallback"/> floor —
+    /// must never itself throw: it is invoked from inside the exact mandatory catch-all that exists
+    /// to guarantee no exception ever crosses the <c>[UnmanagedCallersOnly]</c> native boundary
+    /// undefined-behavior-style (interop.md §3.3). The inner try/catch below is deliberate defense in
+    /// depth against a hypothetical faulting <see cref="ILogger"/> provider, not decoration — a
+    /// provider throwing here would otherwise become exactly the kind of escaping exception this
+    /// whole mechanism exists to prevent.
     /// </remarks>
     [SuppressMessage(
         "Design",
@@ -88,7 +108,7 @@ internal static partial class HookDiagnostics
         ILogger? logger = Volatile.Read(ref s_logger);
         if (logger is null)
         {
-            Console.Error.WriteLine($"[Bastion.Win32] hook callback fault: {exception}");
+            WriteFallback(exception);
             return;
         }
 
@@ -98,12 +118,43 @@ internal static partial class HookDiagnostics
         }
         catch
         {
-            Console.Error.WriteLine($"[Bastion.Win32] hook callback fault: {exception}");
+            WriteFallback(exception);
         }
     }
 
     [LoggerMessage(Level = LogLevel.Error, Message = "Hook callback fault.")]
     private static partial void LogCallbackFaultCore(ILogger logger, Exception exception);
+
+    /// <summary>
+    /// The absolute floor of <see cref="LogCallbackFault(Exception)"/>'s fallback chain: writes
+    /// <paramref name="exception"/> to <see cref="Console.Error"/>, itself guarded against throwing.
+    /// </summary>
+    /// <remarks>
+    /// <c>Console.Error.WriteLine</c> is not actually guaranteed to succeed — a redirected/closed
+    /// console stream can throw an I/O exception, and string interpolation calls
+    /// <paramref name="exception"/>'s own <see cref="Exception.ToString()"/> implicitly, which a
+    /// pathological override could itself throw from. There is genuinely nowhere further to fall
+    /// back to here: an empty <see langword="catch"/> is the correct, deliberate floor of this
+    /// method's own must-never-throw obligation (see <see cref="LogCallbackFault(Exception)"/>'s
+    /// remarks), not an oversight.
+    /// </remarks>
+    [SuppressMessage(
+        "Design",
+        "CA1031:Do not catch general exception types",
+        Justification = "The last-resort floor of a must-never-throw boundary invoked from an " +
+            "[UnmanagedCallersOnly] callback's catch-all (via LogCallbackFault) -- see this method's " +
+            "own remarks. There is nothing further to fall back to if even this throws.")]
+    private static void WriteFallback(Exception exception)
+    {
+        try
+        {
+            Console.Error.WriteLine($"[Bastion.Win32] hook callback fault: {exception}");
+        }
+        catch
+        {
+            // Genuinely nowhere further to go -- see this method's own remarks.
+        }
+    }
 
     /// <summary>
     /// Logs a failed <c>SetWinEventHook</c> registration for one narrow event range. Per
