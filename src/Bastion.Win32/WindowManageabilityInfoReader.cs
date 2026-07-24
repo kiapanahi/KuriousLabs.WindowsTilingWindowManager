@@ -18,13 +18,9 @@ namespace Bastion.Win32;
 /// following values explaining why" (nonzero); the specific reason is never inspected beyond the
 /// zero/nonzero read, per DESIGN.md §3.3/§4's "Bastion deliberately does not depend on the
 /// specific reason flag" —,
-/// <c>GetWindowLongW(GWL_EXSTYLE)</c> (not <c>GetWindowLongPtrW</c>: GWL_EXSTYLE is a 32-bit
-/// <c>DWORD</c> bitmask, never a pointer/handle value, so
-/// <a href="https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-getwindowlongw">GetWindowLongW's
-/// own "superseded by GetWindowLongPtr" note is scoped to "if you are retrieving a pointer or a
-/// handle"</a> and does not apply here; using it also sidesteps <c>GetWindowLongPtrW</c> being
-/// unavailable to CsWin32 on an AnyCPU/no-explicit-RID compilation — interop.md §1.1's
-/// arch-specific-API risk, hit directly during this issue's research),
+/// <c>GetWindowLongW(GWL_EXSTYLE)</c> (via <see cref="WindowProbe.GetExtendedStyle"/>, whose own
+/// remarks carry the <c>GetWindowLongW</c>-vs-<c>GetWindowLongPtrW</c> citation, shared with GitHub
+/// issue #5's <see cref="PlacementSystemAdapter"/> rather than duplicated here a second time),
 /// <c>GetWindow(GW_OWNER)</c>, <c>GetWindowRect</c> (via <see cref="WindowProbe.TryGetBounds"/>),
 /// <c>GetShellWindow</c>, and <c>GetClassName</c> (via <see cref="WindowProbe.GetClassName"/>).
 /// </para>
@@ -45,7 +41,7 @@ internal sealed class WindowManageabilityInfoReader : IWindowManageabilityInfoRe
         bool isVisible = PInvoke.IsWindowVisible(hwnd);
         bool isCloaked = IsCloaked(hwnd);
 
-        WINDOW_EX_STYLE exStyle = ReadExtendedStyle(hwnd);
+        WINDOW_EX_STYLE exStyle = WindowProbe.GetExtendedStyle(hwnd);
         bool hasToolWindowStyle = (exStyle & WINDOW_EX_STYLE.WS_EX_TOOLWINDOW) != (WINDOW_EX_STYLE)0;
         bool hasAppWindowStyle = (exStyle & WINDOW_EX_STYLE.WS_EX_APPWINDOW) != (WINDOW_EX_STYLE)0;
         bool hasNoActivateStyle = (exStyle & WINDOW_EX_STYLE.WS_EX_NOACTIVATE) != (WINDOW_EX_STYLE)0;
@@ -86,11 +82,5 @@ internal sealed class WindowManageabilityInfoReader : IWindowManageabilityInfoRe
 
         uint cloakedValue = BitConverter.ToUInt32(buffer);
         return cloakedValue != 0;
-    }
-
-    private static WINDOW_EX_STYLE ReadExtendedStyle(HWND hwnd)
-    {
-        int raw = PInvoke.GetWindowLong(hwnd, WINDOW_LONG_PTR_INDEX.GWL_EXSTYLE);
-        return (WINDOW_EX_STYLE)unchecked((uint)raw);
     }
 }

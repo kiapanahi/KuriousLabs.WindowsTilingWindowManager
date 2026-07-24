@@ -1,10 +1,8 @@
 using System.Collections.Immutable;
 using System.Diagnostics.CodeAnalysis;
-using System.Runtime.InteropServices;
 using Bastion.Core;
 using Windows.Win32;
 using Windows.Win32.Foundation;
-using Windows.Win32.Graphics.Dwm;
 
 namespace Bastion.Win32;
 
@@ -121,39 +119,16 @@ internal sealed class WindowSystemAdapter(WindowRegistry registry, ICloakStateRe
     }
 
     /// <summary>
-    /// DOCUMENTED CONTRACT (verified against
-    /// https://learn.microsoft.com/windows/win32/api/dwmapi/ne-dwmapi-dwmwindowattribute and
-    /// https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-getwindowrect):
-    /// <c>DWMWA_EXTENDED_FRAME_BOUNDS</c> "retrieves the extended frame bounds rectangle in screen
-    /// space[, of type] RECT," and <c>GetWindowRect</c>'s own remarks point here explicitly to get
-    /// "the visible window bounds, not including the invisible resize borders" — noting the two
-    /// readings are <em>not</em> both DPI-virtualized ("unlike the Window Rect, the DWM Extended
-    /// Frame Bounds are not adjusted for DPI"), a fact DESIGN.md §8 already accounts for via
-    /// PerMonitorV2. Falls back to <paramref name="fallback"/> (the raw <c>GetWindowRect</c>
-    /// reading) on a failing <c>HRESULT</c> (e.g. the window was destroyed between enumeration and
-    /// this call — a routine race, not exceptional), matching <see cref="DwmCloakStateReader"/>'s
-    /// own conservative-default pattern for this exact call family.
+    /// Falls back to <paramref name="fallback"/> (the raw <c>GetWindowRect</c> reading) when
+    /// <see cref="WindowProbe.TryGetExtendedFrameBounds"/> fails (e.g. the window was destroyed
+    /// between enumeration and this call — a routine race, not exceptional), matching
+    /// <see cref="DwmCloakStateReader"/>'s own conservative-default pattern for this exact call
+    /// family. See <see cref="WindowProbe.TryGetExtendedFrameBounds"/> for the documented-contract
+    /// citation (shared with <see cref="PlacementSystemAdapter"/>, GitHub issue #5, rather than
+    /// duplicated here a second time).
     /// </summary>
-    private static RECT TryGetExtendedFrameBounds(HWND hwnd, RECT fallback)
-    {
-        // RECT is four sequential 4-byte LONG (int32) fields, 16 bytes total, matching
-        // DwmCloakStateReader's own "size the stackalloc buffer to the documented pvAttribute
-        // type" convention (interop.md §1).
-        Span<byte> buffer = stackalloc byte[sizeof(int) * 4];
-
-        HRESULT hr;
-        unsafe
-        {
-            // The Span<byte> overload's generated signature is itself `unsafe` (it takes the
-            // address of the span internally) even though nothing in this call site needs a raw
-            // pointer of our own — CsWin32 emits it this way (interop.md §1: "confirm by
-            // inspecting the generated partial"), matching DwmCloakStateReader's identical call
-            // shape for DWMWA_CLOAKED.
-            hr = PInvoke.DwmGetWindowAttribute(hwnd, DWMWINDOWATTRIBUTE.DWMWA_EXTENDED_FRAME_BOUNDS, buffer);
-        }
-
-        return hr.Succeeded ? MemoryMarshal.Read<RECT>(buffer) : fallback;
-    }
+    private static RECT TryGetExtendedFrameBounds(HWND hwnd, RECT fallback) =>
+        WindowProbe.TryGetExtendedFrameBounds(hwnd, out RECT frameBounds) ? frameBounds : fallback;
 
     private static Rect ToRect(RECT rect) => new(rect.left, rect.top, rect.right, rect.bottom);
 }

@@ -136,6 +136,85 @@ public sealed class WindowRegistryTests
         Assert.Null(registry.TryGetEntry(s_someWindow));
     }
 
+    // --- TryGetHwnd (GitHub issue #5's integration gap: WindowId -> HWND resolution) -----------
+
+    [Fact]
+    public async Task TryGetHwndResolvesTheHwndForAnAdmittedWindow()
+    {
+        _pidReader.SetPid(s_someWindow, SomePid);
+        WindowRegistry registry = CreateRegistry();
+        WindowId? windowId = await registry.TryAdmitAsync(s_someWindow, TestContext.Current.CancellationToken);
+
+        bool resolved = registry.TryGetHwnd(windowId!.Value, out HWND hwnd);
+
+        Assert.True(resolved);
+        Assert.Equal(s_someWindow, hwnd);
+    }
+
+    [Fact]
+    public void TryGetHwndReturnsFalseForAWindowIdThatWasNeverAdmitted()
+    {
+        WindowRegistry registry = CreateRegistry();
+
+        bool resolved = registry.TryGetHwnd(WindowId.FromOpaqueValue(999), out HWND hwnd);
+
+        Assert.False(resolved);
+        Assert.Equal(default, hwnd);
+    }
+
+    [Fact]
+    public async Task TryGetHwndReturnsFalseAfterPurge()
+    {
+        _pidReader.SetPid(s_someWindow, SomePid);
+        WindowRegistry registry = CreateRegistry();
+        WindowId? windowId = await registry.TryAdmitAsync(s_someWindow, TestContext.Current.CancellationToken);
+
+        registry.Purge(s_someWindow);
+
+        Assert.False(registry.TryGetHwnd(windowId!.Value, out _));
+    }
+
+    [Fact]
+    public async Task TryGetHwndNoLongerResolvesTheOriginalWindowIdAfterHwndRecycling()
+    {
+        _pidReader.SetPid(s_someWindow, SomePid);
+        WindowRegistry registry = CreateRegistry();
+        WindowId? original = await registry.TryAdmitAsync(s_someWindow, TestContext.Current.CancellationToken);
+
+        const uint recycledPid = 200;
+        _pidReader.SetPid(s_someWindow, recycledPid);
+        WindowId? afterRecycling = await registry.TryAdmitAsync(s_someWindow, TestContext.Current.CancellationToken);
+
+        // The reverse index must be evicted alongside the stale forward entry (WindowRegistry's own
+        // remarks on HWND-recycling correction) -- otherwise TryGetHwnd would keep resolving the
+        // original, now-meaningless WindowId to this HWND, which now identifies a different window.
+        Assert.False(registry.TryGetHwnd(original!.Value, out _));
+        Assert.True(registry.TryGetHwnd(afterRecycling!.Value, out HWND hwnd));
+        Assert.Equal(s_someWindow, hwnd);
+    }
+
+    [Fact]
+    public async Task TryGetHwndDetectsRecyclingEvenWithoutAnInterveningTryAdmitAsyncCall()
+    {
+        // Codex review finding on this PR: if the OS recycles hwnd to an unrelated window before
+        // the original's queued EVENT_OBJECT_DESTROY is processed (Purge not yet called), a caller
+        // that only ever goes through TryGetHwnd -- never re-running TryAdmitAsync, which is exactly
+        // how the Placement Executor calls this -- must not be handed back a now-stale HWND that
+        // identifies a different window.
+        _pidReader.SetPid(s_someWindow, SomePid);
+        WindowRegistry registry = CreateRegistry();
+        WindowId? windowId = await registry.TryAdmitAsync(s_someWindow, TestContext.Current.CancellationToken);
+
+        // Recycled to an unrelated window with a different live PID -- nothing calls TryAdmitAsync
+        // or Purge to notice.
+        _pidReader.SetPid(s_someWindow, 999);
+
+        Assert.False(registry.TryGetHwnd(windowId!.Value, out _));
+
+        // The stale mapping must also be gone, not just misreported this one time.
+        Assert.Null(registry.TryGetEntry(s_someWindow));
+    }
+
     [Fact]
     public async Task EntryRecordsTheInjectedTimeProviderAsFirstSeenTimestamp()
     {

@@ -71,6 +71,14 @@ internal sealed class WindowRegistry(
     TimeProvider timeProvider)
 {
     private readonly Dictionary<HWND, WindowRegistryEntry> _entriesByHwnd = [];
+
+    // Reverse index for TryGetHwnd (GitHub issue #5's integration gap: the Placement Executor's
+    // plan is WindowId-keyed, per Bastion.Core's opaque-WindowId boundary, DESIGN.md §3/§10 — only
+    // this registry, which already "owns identity" per DESIGN.md §3.3, can translate back to a live
+    // HWND). Kept in sync with _entriesByHwnd under the same lock at every mutation site: committed
+    // alongside a new entry, removed alongside a stale-HWND-recycling eviction, and removed by
+    // Purge -- never independently added to or removed from.
+    private readonly Dictionary<WindowId, HWND> _hwndsByWindowId = [];
     private readonly Lock _lock = new();
 
     /// <summary>
@@ -140,6 +148,7 @@ internal sealed class WindowRegistry(
 
             WindowId windowId = idMinter.Mint();
             _entriesByHwnd[hwnd] = new WindowRegistryEntry(windowId, pid, timeProvider.GetUtcNow(), identity);
+            _hwndsByWindowId[windowId] = hwnd;
             return windowId;
         }
     }
@@ -152,7 +161,10 @@ internal sealed class WindowRegistry(
     {
         lock (_lock)
         {
-            _entriesByHwnd.Remove(hwnd);
+            if (_entriesByHwnd.Remove(hwnd, out WindowRegistryEntry? removed))
+            {
+                _hwndsByWindowId.Remove(removed.WindowId);
+            }
         }
     }
 
@@ -162,6 +174,57 @@ internal sealed class WindowRegistry(
         lock (_lock)
         {
             return _entriesByHwnd.GetValueOrDefault(hwnd);
+        }
+    }
+
+    /// <summary>
+    /// Resolves <paramref name="windowId"/> back to its current live <c>HWND</c> — the reverse of
+    /// admission, needed by the Placement Executor (GitHub issue #5) to turn a <c>WindowId</c>-keyed
+    /// <see cref="PlacementInstruction"/> plan into actual Win32 calls without ever letting an
+    /// <c>HWND</c> cross into <c>Bastion.Core</c> (DESIGN.md §3, §10). Returns
+    /// <see langword="false"/> if the window has since been purged (vanished).
+    /// </summary>
+    /// <remarks>
+    /// <b>Revalidates the live PID before handing back the HWND (Codex review finding on this
+    /// PR).</b> A caller of this method — unlike <see cref="TryAdmitAsync"/>'s own callers — never
+    /// re-runs the manageability filter or otherwise re-triggers HWND-recycling detection first: the
+    /// Placement Executor calls this directly, on its own schedule, independent of any WinEvent. If
+    /// the OS recycles <paramref name="windowId"/>'s HWND to an unrelated window while this window's
+    /// own <c>EVENT_OBJECT_DESTROY</c> is still only queued (<see cref="Purge"/> not yet called),
+    /// returning the stale mapping unchecked would hand the caller an HWND that now identifies a
+    /// completely different window — this method applies the same live-PID recheck
+    /// <see cref="TryFindExistingUnderLock"/> already performs for the forward (HWND → entry)
+    /// direction, evicting both index entries on a mismatch rather than trusting the mapping blindly.
+    /// </remarks>
+    public bool TryGetHwnd(WindowId windowId, out HWND hwnd)
+    {
+        lock (_lock)
+        {
+            if (!_hwndsByWindowId.TryGetValue(windowId, out hwnd))
+            {
+                return false;
+            }
+
+            if (!_entriesByHwnd.TryGetValue(hwnd, out WindowRegistryEntry? entry) || entry.WindowId != windowId)
+            {
+                // Already evicted/replaced by some other path under this same lock -- treat as gone.
+                hwnd = default;
+                return false;
+            }
+
+            if (pidReader.TryReadProcessId(hwnd) != entry.Pid)
+            {
+                // Recycled since this entry was minted, with no DESTROY/Purge yet -- evict both
+                // sides of the now-stale mapping (the same correction TryFindExistingUnderLock
+                // performs for the forward direction) rather than returning an HWND that no longer
+                // identifies the window this WindowId was minted for.
+                _entriesByHwnd.Remove(hwnd);
+                _hwndsByWindowId.Remove(windowId);
+                hwnd = default;
+                return false;
+            }
+
+            return true;
         }
     }
 
@@ -204,8 +267,11 @@ internal sealed class WindowRegistry(
                 return entry;
             }
 
-            // Stale entry for a recycled HWND — see this type's remarks.
+            // Stale entry for a recycled HWND — see this type's remarks. Evict the reverse-index
+            // entry too, or TryGetHwnd would keep resolving this WindowId to an HWND that no
+            // longer identifies the window it was minted for.
             _entriesByHwnd.Remove(hwnd);
+            _hwndsByWindowId.Remove(entry.WindowId);
         }
 
         return null;
