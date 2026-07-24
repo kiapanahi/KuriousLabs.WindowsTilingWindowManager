@@ -68,6 +68,10 @@ jobs:
         run: dotnet publish src/Bastion.Daemon -r win-x64 --configuration Release
       - name: Publish bastionc win-x64 (AOT/trim validation — quality-gates.md §8 step 4)
         run: dotnet publish src/Bastion.Cli -r win-x64 --configuration Release
+      # Bastion.TestWindows is also PublishAot=true (its own small CsWin32 consumer, GitHub
+      # issue #13) but was missing from this gate — added here rather than left uncovered.
+      - name: Publish Bastion.TestWindows win-x64 (AOT/trim validation — quality-gates.md §8 step 4)
+        run: dotnet publish src/Bastion.TestWindows -r win-x64 --configuration Release
 
 # Deliberately not wired up yet — tracked as issues rather than left as a silent gap:
 #
