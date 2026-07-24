@@ -76,16 +76,18 @@ public sealed class CompositionRootServiceCollectionExtensionsTests : IDisposabl
         List<IHostedService> hostedServices = [.. host.Services.GetServices<IHostedService>()];
 
         // One hosted service per registration call across every AddBastionXxx/AddWindowRulesConfiguration
-        // extension: journal restore; hot-reload + schema publisher; WinEvent pump, Coalescer,
-        // ReconcilerIntentPump, ReconcilerLoopService, PlacementExecutionPump; input pump; the
-        // monitor-topology stub. A mismatch here means either a missing registration or an
-        // accidental double-registration -- both real composition-root bugs.
-        Assert.Equal(10, hostedServices.Count);
+        // extension: journal restore; hot-reload + schema publisher; the default-workspace seed,
+        // WinEvent pump, Coalescer, ReconcilerIntentPump, ReconcilerLoopService,
+        // PlacementExecutionPump; input pump; the monitor-topology stub. A mismatch here means
+        // either a missing registration or an accidental double-registration -- both real
+        // composition-root bugs.
+        Assert.Equal(11, hostedServices.Count);
 
         HashSet<string> hostedServiceTypeNames = [.. hostedServices.Select(s => s.GetType().Name)];
         Assert.Contains("JournalRestoreOnShutdownService", hostedServiceTypeNames);
         Assert.Contains("WindowRulesHotReloadService", hostedServiceTypeNames);
         Assert.Contains("WindowRulesSchemaPublisherService", hostedServiceTypeNames);
+        Assert.Contains("DefaultWorkspaceSeedingService", hostedServiceTypeNames);
         Assert.Contains("WinEventPumpService", hostedServiceTypeNames);
         Assert.Contains("Coalescer", hostedServiceTypeNames);
         Assert.Contains("ReconcilerIntentPump", hostedServiceTypeNames);

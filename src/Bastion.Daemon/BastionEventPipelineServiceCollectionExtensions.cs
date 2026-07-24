@@ -48,6 +48,19 @@ namespace Bastion.Daemon;
 /// from whichever producer exposes it) are registered.
 /// </para>
 /// <para>
+/// <b>Two Codex review findings on this PR, both fixed here.</b> The pipeline as first wired
+/// compiled, resolved, and ran, but never actually tiled anything: <see cref="Reconciler"/> starts
+/// with <see cref="DesiredState.Empty"/>, and its desired-window-set sync only auto-admits a window
+/// into <see cref="WorkspaceKey.Default"/> if that workspace already exists — nothing called
+/// <see cref="Reconciler.SetWorkspace"/> in production. <see cref="DefaultWorkspaceSeedingService"/>
+/// fixes this (see its own remarks). Separately, <see cref="ReconcilerIntentPump"/>'s
+/// <c>WindowVanished</c> handling purged only <see cref="WindowRegistry"/>, leaving
+/// <see cref="PlacementExecutor"/>'s own quarantine dictionary to grow unbounded across the churn of
+/// windows opening and closing — fixed by forwarding the same vanish signal to
+/// <see cref="PlacementExecutor.Purge"/> too (see that type's own remarks for why this needed a new
+/// lock, not just a new call).
+/// </para>
+/// <para>
 /// <b>Out of scope, deliberately (see the GitHub issue #10 PR description for the full
 /// reasoning).</b> Window-rules-driven float/ignore admission decisions are not wired here —
 /// <see cref="Reconciler"/>'s own desired-window-set sync auto-admits every eligible window into
@@ -71,7 +84,16 @@ internal static class BastionEventPipelineServiceCollectionExtensions
 
         services.TryAddSingleton(TimeProvider.System);
 
-        // Window Registry & identity-resolution chain (DESIGN.md §3.3).
+        AddWindowRegistryChain(services);
+        AddReconciliationCore(services);
+        AddPipelineHostedServices(services);
+
+        return services;
+    }
+
+    /// <summary>Window Registry, identity resolution (DESIGN.md §3.3), and the Win32-facing seams the reconciliation core depends on.</summary>
+    private static void AddWindowRegistryChain(IServiceCollection services)
+    {
         services.TryAddSingleton<ShellComThread>();
         services.TryAddSingleton<IWindowProcessIdReader, WindowProcessIdReader>();
         services.TryAddSingleton<IProcessAumidReader, ProcessAumidReader>();
@@ -84,25 +106,38 @@ internal static class BastionEventPipelineServiceCollectionExtensions
         services.TryAddSingleton<WindowIdMinter>();
         services.TryAddSingleton<WindowRegistry>();
 
-        // Win32-facing seams the Reconciler/Placement Executor pipeline depends on.
         services.TryAddSingleton<ICloakStateReader, DwmCloakStateReader>();
         services.TryAddSingleton<IWindowSystem, WindowSystemAdapter>();
         services.TryAddSingleton<IPlacementSystem, PlacementSystemAdapter>();
         services.TryAddSingleton<IReconcileNowSignal, ReconcileNowSignal>();
+    }
 
-        // Bastion.Core: pure reconciliation, fed the one shipped layout engine (DESIGN.md §6, §12 v0.1).
+    /// <summary>Bastion.Core's pure reconciliation (fed the one shipped layout engine, DESIGN.md §6/§12 v0.1) and the Placement Executor.</summary>
+    private static void AddReconciliationCore(IServiceCollection services)
+    {
         services.TryAddSingleton<ILayoutEngine, DwindleLayoutEngine>();
         services.TryAddSingleton(ReconcilerOptions.Default);
         services.TryAddSingleton<Reconciler>();
 
-        // Bastion.Win32: placement execution.
         services.TryAddSingleton(PlacementExecutorOptions.Default);
         services.TryAddSingleton<PlacementExecutor>();
+    }
 
-        // The pipeline's own hosted services, registered (and therefore started) in DESIGN.md §3's
-        // pipeline order: WinEvent pump -> Coalescer -> ReconcilerIntentPump -> ReconcilerLoopService
-        // -> PlacementExecutionPump. See this type's own remarks for why this whole block occupies
-        // the "event ingest pump" required-order slot rather than competing with it.
+    /// <summary>
+    /// The pipeline's own hosted services, registered (and therefore started) in order:
+    /// <see cref="DefaultWorkspaceSeedingService"/> first (see its own remarks for the Codex review
+    /// finding this fixes), then DESIGN.md §3's WinEvent pump -&gt; Coalescer -&gt;
+    /// <see cref="ReconcilerIntentPump"/> -&gt; <see cref="ReconcilerLoopService"/> -&gt;
+    /// <see cref="PlacementExecutionPump"/> chain — this whole block occupies the "event ingest
+    /// pump" required-order slot rather than competing with it (see this type's own remarks).
+    /// </summary>
+    private static void AddPipelineHostedServices(IServiceCollection services)
+    {
+        services.AddHostedService<DefaultWorkspaceSeedingService>();
+
+        // Dual concrete + IHostedService registration -- see this type's own remarks for why only
+        // WinEventPumpService/Coalescer need it (a downstream stage reads .IngestReader/.IntentReader
+        // off the producer's own concrete type).
         services.TryAddSingleton<WinEventPumpService>();
         services.AddSingleton<IHostedService>(static sp => sp.GetRequiredService<WinEventPumpService>());
 
@@ -122,7 +157,5 @@ internal static class BastionEventPipelineServiceCollectionExtensions
 
         services.TryAddSingleton(static sp => sp.GetRequiredService<Reconciler>().PlacementPlanReader);
         services.AddHostedService<PlacementExecutionPump>();
-
-        return services;
     }
 }

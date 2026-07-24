@@ -19,17 +19,26 @@ namespace Bastion.Win32;
 /// <see cref="Reconciler.RequestReconcileNow"/>.
 /// </para>
 /// <para>
-/// <b><see cref="WindowVanished"/> is the one exception, for registry hygiene, not convergence.</b>
-/// DESIGN.md §3.3/§5: "entries are purged only on <c>EVENT_OBJECT_DESTROY</c> — never by
-/// <c>IsWindow</c> polling," and <see cref="WindowVanished"/>'s own doc comment already names this
-/// as its purpose. This class is the first (and, before this fix, the only) production consumer of
-/// the Coalescer's intent stream, so purging is this bridge's job: without it, a destroyed window's
-/// stale <see cref="WindowRegistry"/> entry survives indefinitely, and if the OS later recycles its
-/// <c>HWND</c> to a genuinely different window in the <em>same</em> process,
+/// <b><see cref="WindowVanished"/> is the one exception, for registry/executor hygiene, not
+/// convergence.</b> DESIGN.md §3.3/§5: "entries are purged only on <c>EVENT_OBJECT_DESTROY</c> —
+/// never by <c>IsWindow</c> polling," and <see cref="WindowVanished"/>'s own doc comment already
+/// names this as its purpose. This class is the first (and, before this fix, the only) production
+/// consumer of the Coalescer's intent stream, so purging is this bridge's job: without it, a
+/// destroyed window's stale <see cref="WindowRegistry"/> entry survives indefinitely, and if the OS
+/// later recycles its <c>HWND</c> to a genuinely different window in the <em>same</em> process,
 /// <see cref="WindowRegistry.TryAdmitAsync"/>'s own PID-match "already registered" check (its own
 /// remarks) wrongly hands the new window the old, stale <see cref="WindowId"/> — identity, layout
 /// position, and reassert-budget state all carried over incorrectly (Codex review finding on this
-/// PR). Every other intent kind still carries no payload-specific handling at all.
+/// PR). The <see cref="WindowId"/> is captured <em>before</em> <see cref="WindowRegistry.Purge"/>
+/// runs — <see cref="WindowRegistry.Purge"/> removes the very HWND-to-<see cref="WindowId"/> mapping
+/// this lookup needs — and then forwarded to <see cref="PlacementExecutor.Purge"/> too (a second
+/// Codex review finding on this PR): without that second purge, <see cref="PlacementExecutor"/>'s
+/// own quarantine dictionary grows unbounded across the churn of windows opening and closing for the
+/// daemon's entire lifetime, since nothing else in production ever calls it. <see cref="PlacementExecutor"/>
+/// itself is safe to call concurrently with an in-flight <see cref="PlacementExecutor.ApplyAsync"/>
+/// pass running on <c>PlacementExecutionPump</c>'s own separate loop — see
+/// <see cref="PlacementExecutor"/>'s own remarks for why. Every other intent kind still carries no
+/// payload-specific handling at all.
 /// </para>
 /// <para>
 /// Hosting shape matches <see cref="Coalescer"/>'s own: a <see cref="BackgroundService"/>, not a
@@ -38,22 +47,21 @@ namespace Bastion.Win32;
 /// registration of its own (docs/engineering/daemon-architecture.md §2).
 /// </para>
 /// <para>
-/// Not yet wired into the composition root (<c>Bastion.Daemon</c>) — that is GitHub issue #10; this
-/// type is constructed directly by tests today via <c>InternalsVisibleTo</c>, matching
-/// <see cref="Coalescer"/>/<see cref="WinEventPumpService"/>'s own established pattern.
+/// Registered via <c>AddHostedService&lt;ReconcilerIntentPump&gt;()</c> in <c>Bastion.Daemon</c>'s
+/// composition root (GitHub issue #10).
 /// </para>
 /// </remarks>
 [SuppressMessage(
     "Performance",
     "CA1812:Avoid uninstantiated internal classes",
-    Justification = "Constructed by tests via InternalsVisibleTo today, and intended to be " +
-        "registered with AddHostedService<ReconcilerIntentPump>() once Bastion.Daemon's " +
-        "composition root is wired (GitHub issue #10) — not yet wired as of this change. Same " +
-        "documented CA1812 false-positive shape as Coalescer/WinEventPumpService/BastiondService.")]
+    Justification = "Constructed by tests via InternalsVisibleTo, and registered with " +
+        "AddHostedService<ReconcilerIntentPump>() in Bastion.Daemon's composition root (GitHub " +
+        "issue #10). Same documented CA1812 false-positive shape as Coalescer/WinEventPumpService.")]
 internal sealed class ReconcilerIntentPump(
     ChannelReader<CoalescedIntent> intentReader,
     WindowRegistry registry,
-    Reconciler reconciler) : BackgroundService
+    Reconciler reconciler,
+    PlacementExecutor placementExecutor) : BackgroundService
 {
     /// <inheritdoc/>
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -65,7 +73,17 @@ internal sealed class ReconcilerIntentPump(
                 // The one payload-specific action this bridge takes -- see this type's remarks.
                 // HWND has no implicit nint conversion in this direction (only HWND -> nint,
                 // used elsewhere e.g. WinEventPumpService's OnWinEvent) -- confirmed by the build.
-                registry.Purge(new HWND(vanished.Hwnd));
+                var hwnd = new HWND(vanished.Hwnd);
+
+                // Capture the WindowId before Purge removes the HWND -> WindowId mapping
+                // TryGetEntry needs to look it up -- see this type's own remarks.
+                WindowId? windowId = registry.TryGetEntry(hwnd)?.WindowId;
+                registry.Purge(hwnd);
+
+                if (windowId is { } id)
+                {
+                    placementExecutor.Purge(id);
+                }
             }
 
             reconciler.RequestReconcileNow();
