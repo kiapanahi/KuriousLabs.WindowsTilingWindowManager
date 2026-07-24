@@ -4,6 +4,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading.Channels;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Windows.Win32;
 using Windows.Win32.Foundation;
 using Windows.Win32.UI.Accessibility;
@@ -83,15 +84,17 @@ internal sealed class WinEventPumpService : IHostedService, IDisposable
     private static readonly ConcurrentDictionary<HWINEVENTHOOK, GCHandle> s_hookContexts = new();
 
     private readonly Channel<WinEvent> _ingestChannel;
+    private readonly ILogger<WinEventPumpService> _logger;
     private readonly List<HWINEVENTHOOK> _registeredHooks = new(capacity: s_eventRanges.Length);
     private readonly ManualResetEventSlim _threadReady = new(initialState: false);
     private Thread? _pumpThread;
     private volatile bool _stopRequested;
     private uint _pumpThreadId;
 
-    public WinEventPumpService(IReconcileNowSignal reconcileNowSignal)
+    public WinEventPumpService(IReconcileNowSignal reconcileNowSignal, ILogger<WinEventPumpService> logger)
     {
         _ingestChannel = WinEventChannelFactory.CreateIngestChannel(reconcileNowSignal);
+        _logger = logger;
     }
 
     /// <summary>
@@ -159,7 +162,7 @@ internal sealed class WinEventPumpService : IHostedService, IDisposable
                 // Not immediately fatal — the bounded Join below still turns a pump that misses
                 // WM_QUIT into an observable TimeoutException rather than a silent hang — but a
                 // genuine occurrence of this documented failure should be visible, not discarded.
-                HookDiagnostics.LogPostQuitMessageFailed(_pumpThreadId, "WinEvent pump");
+                _logger.LogPostQuitMessageFailed(_pumpThreadId, "WinEvent pump");
             }
         }
 
@@ -204,7 +207,7 @@ internal sealed class WinEventPumpService : IHostedService, IDisposable
                 // could still invoke OnWinEvent with this same contextHandle — freeing it anyway
                 // risks that callback resolving a freed GCHandle. An intentional, logged leak is
                 // far safer than that use-after-free class of bug.
-                HookDiagnostics.LogHookContextLeakedAfterFailedUnhook();
+                _logger.LogHookContextLeakedAfterFailedUnhook();
             }
 
             // Safety net: if RegisterHooks/something before the Set() call above ever threw
@@ -241,7 +244,7 @@ internal sealed class WinEventPumpService : IHostedService, IDisposable
                 // truth, so a failed registration for one range skips that range rather than
                 // crashing daemon startup — the Reconciler's heartbeat re-sync still catches
                 // whatever this range would have reported.
-                HookDiagnostics.LogHookRegistrationFailed(min, max);
+                _logger.LogHookRegistrationFailed(min, max);
                 continue;
             }
 
@@ -273,7 +276,7 @@ internal sealed class WinEventPumpService : IHostedService, IDisposable
             bool unhookSucceeded = PInvoke.UnhookWinEvent(hook);
             if (!HookUnregistration.ApplyResult(hook, unhookSucceeded, s_hookContexts))
             {
-                HookDiagnostics.LogUnhookWinEventFailed(hook);
+                _logger.LogUnhookWinEventFailed(hook);
                 allUnregistered = false;
             }
         }
@@ -298,7 +301,7 @@ internal sealed class WinEventPumpService : IHostedService, IDisposable
                     // Unexpected: this pump always passes a null hWnd filter, so the documented
                     // invalid-window-handle trigger for -1 should not occur in practice — exit
                     // rather than spin forever on a persistent error, per GetMessage's own docs.
-                    HookDiagnostics.LogMessageLoopFault("WinEvent pump");
+                    _logger.LogMessageLoopFault("WinEvent pump");
                     return;
                 default:
                     _ = PInvoke.TranslateMessage(message);

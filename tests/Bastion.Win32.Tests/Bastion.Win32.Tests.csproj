@@ -22,6 +22,12 @@
 
     <!-- FakeTimeProvider for deterministic Coalescer coalescing-window tests (testing.md §4). -->
     <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" />
+
+    <!-- FakeLogger(T)/FakeLogCollector for asserting HookDiagnostics' [LoggerMessage] output
+         (GitHub issue #14); Microsoft.Extensions.Logging.Abstractions itself (ILogger, NullLogger,
+         LoggerMessageAttribute) already flows in transitively via Bastion.Win32's own
+         Microsoft.Extensions.Hosting.Abstractions reference. -->
+    <PackageReference Include="Microsoft.Extensions.Diagnostics.Testing" />
   </ItemGroup>
 
 </Project>

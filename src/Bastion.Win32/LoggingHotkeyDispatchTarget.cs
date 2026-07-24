@@ -1,4 +1,5 @@
 using System.Diagnostics.CodeAnalysis;
+using Microsoft.Extensions.Logging;
 
 namespace Bastion.Win32;
 
@@ -21,8 +22,8 @@ namespace Bastion.Win32;
         "(see that class's remarks: this suppression is inert today given .NET 10's default-off " +
         "CA1812 plus this assembly's InternalsVisibleTo, kept for consistency and " +
         "forward-compatibility).")]
-internal sealed class LoggingHotkeyDispatchTarget : IHotkeyDispatchTarget
+internal sealed class LoggingHotkeyDispatchTarget(ILogger<LoggingHotkeyDispatchTarget> logger) : IHotkeyDispatchTarget
 {
     /// <inheritdoc/>
-    public void OnHotkeyInvoked(HotkeyCommand command) => HookDiagnostics.LogHotkeyInvoked(command);
+    public void OnHotkeyInvoked(HotkeyCommand command) => logger.LogHotkeyInvoked(command);
 }
