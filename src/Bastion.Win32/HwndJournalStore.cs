@@ -49,14 +49,22 @@ internal sealed class HwndJournalStore(string journalFilePath) : IHwndJournalSto
     /// <inheritdoc/>
     public async Task<JournalDocument> ReadAsync(CancellationToken cancellationToken = default)
     {
-        if (!File.Exists(journalFilePath))
+        byte[] bytes;
+        try
         {
-            // No journal file yet -- a fresh install, or a journal nothing has ever been written
-            // to. The routine, expected "nothing outstanding" case, not an error.
+            bytes = await File.ReadAllBytesAsync(journalFilePath, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            // No journal file -- a fresh install, a journal nothing has ever been written to, or
+            // (rarely) the file was deleted between some earlier existence check and this read.
+            // Reading directly and catching here (rather than a preceding File.Exists check) closes
+            // that time-of-check/time-of-use gap entirely (Copilot review finding on this PR) --
+            // this is the routine, expected "nothing outstanding" case, not an error. Every other
+            // IOException (e.g. sharing violation, access denied) still propagates.
             return JournalDocument.Empty;
         }
 
-        byte[] bytes = await File.ReadAllBytesAsync(journalFilePath, cancellationToken).ConfigureAwait(false);
         return JsonSerializer.Deserialize(bytes, JournalJsonContext.Default.JournalDocument)
             ?? throw new JsonException($"Journal file '{journalFilePath}' deserialized to a null document.");
     }
@@ -78,7 +86,30 @@ internal sealed class HwndJournalStore(string journalFilePath) : IHwndJournalSto
         string tempPath = $"{journalFilePath}.{Guid.NewGuid():N}.tmp";
 
         byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(document, JournalJsonContext.Default.JournalDocument);
-        await File.WriteAllBytesAsync(tempPath, bytes, cancellationToken).ConfigureAwait(false);
-        File.Move(tempPath, journalFilePath, overwrite: true);
+        try
+        {
+            await File.WriteAllBytesAsync(tempPath, bytes, cancellationToken).ConfigureAwait(false);
+            File.Move(tempPath, journalFilePath, overwrite: true);
+        }
+        catch
+        {
+            // The real journal at journalFilePath is untouched by a failed write/move (that's the
+            // whole point of the temp-file-plus-rename pattern) -- but the temp file itself may
+            // still exist (e.g. WriteAllBytesAsync succeeded and the Move failed). Best-effort
+            // clean it up rather than leaving litter for every failed write; never let a cleanup
+            // failure here mask the real exception.
+            try
+            {
+                File.Delete(tempPath);
+            }
+            catch (IOException)
+            {
+            }
+            catch (UnauthorizedAccessException)
+            {
+            }
+
+            throw;
+        }
     }
 }

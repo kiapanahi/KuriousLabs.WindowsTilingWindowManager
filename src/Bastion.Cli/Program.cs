@@ -37,7 +37,8 @@ static int NotYetImplemented(string subcommandName)
 static async Task<int> RestoreWindowsAsync(CancellationToken cancellationToken)
 {
     var store = new HwndJournalStore(HwndJournalStore.DefaultJournalFilePath);
-    var restorer = new HwndJournalRestorer(store, new JournalPlacementSystemAdapter(), new WindowProcessIdReader());
+    using var journalLock = new HwndJournalLock();
+    var restorer = new HwndJournalRestorer(store, new JournalPlacementSystemAdapter(), new WindowProcessIdReader(), journalLock);
 
     ImmutableArray<JournalRestoreOutcome> outcomes;
     try
@@ -64,24 +65,9 @@ static async Task<int> RestoreWindowsAsync(CancellationToken cancellationToken)
     int failureCount = 0;
     foreach (JournalRestoreOutcome outcome in outcomes)
     {
-        string identity = DescribeIdentity(outcome.Entry.Identity);
-        switch (outcome.Kind)
+        if (await PrintOutcomeAsync(outcome).ConfigureAwait(false))
         {
-            case JournalRestoreOutcomeKind.Restored:
-                await Console.Out.WriteLineAsync($"Restored {identity} (pid {outcome.Entry.ProcessId}).").ConfigureAwait(false);
-                break;
-            case JournalRestoreOutcomeKind.SkippedWindowGone:
-                await Console.Out.WriteLineAsync($"Skipped {identity} (pid {outcome.Entry.ProcessId}): the window no longer exists.").ConfigureAwait(false);
-                break;
-            case JournalRestoreOutcomeKind.SkippedHwndRecycled:
-                await Console.Out.WriteLineAsync($"Skipped {identity} (pid {outcome.Entry.ProcessId}): its window handle has been recycled to a different window.").ConfigureAwait(false);
-                break;
-            case JournalRestoreOutcomeKind.Failed:
-                await Console.Error.WriteLineAsync($"Failed to restore {identity} (pid {outcome.Entry.ProcessId}): Win32 error {outcome.ErrorCode}.").ConfigureAwait(false);
-                failureCount++;
-                break;
-            default:
-                break;
+            failureCount++;
         }
     }
 
@@ -93,6 +79,34 @@ static async Task<int> RestoreWindowsAsync(CancellationToken cancellationToken)
     }
 
     return 0;
+}
+
+/// <summary>Prints one restore outcome to stdout/stderr as appropriate. Returns whether it counts as a failure.</summary>
+static async Task<bool> PrintOutcomeAsync(JournalRestoreOutcome outcome)
+{
+    string identity = DescribeIdentity(outcome.Entry.Identity);
+    switch (outcome.Kind)
+    {
+        case JournalRestoreOutcomeKind.Restored:
+            await Console.Out.WriteLineAsync($"Restored {identity} (pid {outcome.Entry.ProcessId}).").ConfigureAwait(false);
+            return false;
+        case JournalRestoreOutcomeKind.SkippedWindowGone:
+            await Console.Out.WriteLineAsync($"Skipped {identity} (pid {outcome.Entry.ProcessId}): the window no longer exists.").ConfigureAwait(false);
+            return false;
+        case JournalRestoreOutcomeKind.SkippedHwndRecycled:
+            await Console.Out.WriteLineAsync($"Skipped {identity} (pid {outcome.Entry.ProcessId}): its window handle has been recycled to a different window.").ConfigureAwait(false);
+            return false;
+        case JournalRestoreOutcomeKind.Failed:
+            await Console.Error.WriteLineAsync($"Failed to restore {identity} (pid {outcome.Entry.ProcessId}): Win32 error {outcome.ErrorCode}.").ConfigureAwait(false);
+            return true;
+        default:
+            // An outcome kind this build doesn't recognize (e.g. a newer bastionc talking to a
+            // journal shape from a future version) must count as a failure, not a silent success --
+            // an unhandled case here must never let this command exit 0 having actually done
+            // nothing for that entry (Copilot review finding on this PR).
+            await Console.Error.WriteLineAsync($"Unrecognized restore outcome for {identity} (pid {outcome.Entry.ProcessId}): {outcome.Kind}.").ConfigureAwait(false);
+            return true;
+    }
 }
 
 static string DescribeIdentity(WindowIdentity identity) => identity.Kind switch

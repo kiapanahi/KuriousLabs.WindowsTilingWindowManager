@@ -18,7 +18,8 @@ public sealed class HwndJournalRestorerTests
     public async Task EmptyJournalProducesNoOutcomesAndNeverWritesTheStore()
     {
         var store = new FakeHwndJournalStore();
-        var restorer = new HwndJournalRestorer(store, new FakeJournalPlacementSystem(), new FakeWindowProcessIdReader());
+        using var journalLock = new FakeHwndJournalLock();
+        var restorer = new HwndJournalRestorer(store, new FakeJournalPlacementSystem(), new FakeWindowProcessIdReader(), journalLock);
 
         ImmutableArray<JournalRestoreOutcome> outcomes = await restorer.RestoreAllAsync(TestContext.Current.CancellationToken);
 
@@ -34,7 +35,8 @@ public sealed class HwndJournalRestorerTests
         JournalEntry entry = CreateEntry(pid: 42);
         await Seed(store, entry);
         var pidReader = new FakeWindowProcessIdReader(); // no SetPid -- simulates a vanished window
-        var restorer = new HwndJournalRestorer(store, new FakeJournalPlacementSystem(), pidReader);
+        using var journalLock = new FakeHwndJournalLock();
+        var restorer = new HwndJournalRestorer(store, new FakeJournalPlacementSystem(), pidReader, journalLock);
 
         JournalRestoreOutcome outcome = Assert.Single(await restorer.RestoreAllAsync(TestContext.Current.CancellationToken));
 
@@ -59,7 +61,8 @@ public sealed class HwndJournalRestorerTests
         var pidReader = new FakeWindowProcessIdReader();
         pidReader.SetPid(s_hwnd, 999); // a different, unrelated process now owns this HWND value
         var placementSystem = new FakeJournalPlacementSystem();
-        var restorer = new HwndJournalRestorer(store, placementSystem, pidReader);
+        using var journalLock = new FakeHwndJournalLock();
+        var restorer = new HwndJournalRestorer(store, placementSystem, pidReader, journalLock);
 
         JournalRestoreOutcome outcome = Assert.Single(await restorer.RestoreAllAsync(TestContext.Current.CancellationToken));
 
@@ -79,7 +82,8 @@ public sealed class HwndJournalRestorerTests
         var pidReader = new FakeWindowProcessIdReader();
         pidReader.SetPid(s_hwnd, 42); // same process that owned it at journal-write time
         var placementSystem = new FakeJournalPlacementSystem();
-        var restorer = new HwndJournalRestorer(store, placementSystem, pidReader);
+        using var journalLock = new FakeHwndJournalLock();
+        var restorer = new HwndJournalRestorer(store, placementSystem, pidReader, journalLock);
 
         JournalRestoreOutcome outcome = Assert.Single(await restorer.RestoreAllAsync(TestContext.Current.CancellationToken));
 
@@ -103,7 +107,8 @@ public sealed class HwndJournalRestorerTests
         pidReader.SetPid(s_hwnd, 42);
         var placementSystem = new FakeJournalPlacementSystem();
         placementSystem.SetApplyResult(s_hwnd, PlacementCallResult.Fail(WIN32_ERROR.ERROR_ACCESS_DENIED));
-        var restorer = new HwndJournalRestorer(store, placementSystem, pidReader);
+        using var journalLock = new FakeHwndJournalLock();
+        var restorer = new HwndJournalRestorer(store, placementSystem, pidReader, journalLock);
 
         JournalRestoreOutcome outcome = Assert.Single(await restorer.RestoreAllAsync(TestContext.Current.CancellationToken));
 
@@ -130,7 +135,8 @@ public sealed class HwndJournalRestorerTests
         pidReader.SetPid(failHwnd, 20);
         var placementSystem = new FakeJournalPlacementSystem();
         placementSystem.SetApplyResult(failHwnd, PlacementCallResult.Fail(WIN32_ERROR.ERROR_ACCESS_DENIED));
-        var restorer = new HwndJournalRestorer(store, placementSystem, pidReader);
+        using var journalLock = new FakeHwndJournalLock();
+        var restorer = new HwndJournalRestorer(store, placementSystem, pidReader, journalLock);
 
         ImmutableArray<JournalRestoreOutcome> outcomes = await restorer.RestoreAllAsync(TestContext.Current.CancellationToken);
 

@@ -33,12 +33,12 @@ internal sealed class JournalEntryCapture(
     /// vanished between whatever produced <paramref name="hwnd"/> and this call) — a routine race,
     /// not exceptional.
     /// </summary>
-    public bool TryCapture(HWND hwnd, WorkspaceKey workspace, WindowIdentity identity, out JournalEntry entry)
+    public bool TryCapture(HWND hwnd, WorkspaceKey workspace, WindowIdentity identity, [MaybeNullWhen(false)] out JournalEntry entry)
     {
         uint? pid = pidReader.TryReadProcessId(hwnd);
         if (pid is null || !placementSystem.TryCapturePlacement(hwnd, out JournalWindowPlacement placement))
         {
-            entry = null!;
+            entry = null;
             return false;
         }
 

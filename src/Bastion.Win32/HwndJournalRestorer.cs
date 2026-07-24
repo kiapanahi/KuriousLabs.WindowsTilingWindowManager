@@ -38,6 +38,15 @@ namespace Bastion.Win32;
 /// remaining entry list is empty — DESIGN.md's "clean shutdown restores all windows first" reading
 /// of "clean" as "nothing outstanding," not merely "an attempt was made."
 /// </para>
+/// <para>
+/// <b>Cross-process serialization (Codex review finding on this PR).</b> The whole read-restore-write
+/// pass runs under <paramref name="journalLock"/> for the identical reason
+/// <see cref="HwndJournalWriter.RecordThenActAsync"/> does — without it, this method could read and
+/// clear an entry for a window the daemon is still in the middle of hiding (the write-ahead entry
+/// is durable before the hide call runs), restoring a window that then gets hidden moments later
+/// with no journal row left to recover it. Holding the same named lock as the writer means the two
+/// operations run to completion one at a time, never interleaved.
+/// </para>
 /// </remarks>
 [SuppressMessage(
     "Performance",
@@ -47,42 +56,47 @@ namespace Bastion.Win32;
         "called from JournalRestoreOnShutdownService once Bastion.Daemon's composition root is " +
         "wired (GitHub issue #10). Same documented CA1812 false-positive shape as " +
         "PlacementExecutor/Coalescer/WindowSystemAdapter.")]
-internal sealed class HwndJournalRestorer(IHwndJournalStore store, IJournalPlacementSystem placementSystem, IWindowProcessIdReader pidReader)
+internal sealed class HwndJournalRestorer(
+    IHwndJournalStore store, IJournalPlacementSystem placementSystem, IWindowProcessIdReader pidReader, IHwndJournalLock journalLock)
 {
     /// <summary>
     /// Attempts every currently-journaled entry once, in journal order, and durably rewrites the
     /// journal to keep only the ones that still need a future retry (see this type's remarks).
-    /// Returns one outcome per attempted entry, in the same order.
+    /// Returns one outcome per attempted entry, in the same order. The whole pass runs under the
+    /// cross-process journal lock.
     /// </summary>
     public async Task<ImmutableArray<JournalRestoreOutcome>> RestoreAllAsync(CancellationToken cancellationToken = default)
     {
-        JournalDocument document = await store.ReadAsync(cancellationToken).ConfigureAwait(false);
-        if (document.Entries.IsEmpty)
+        using (await journalLock.AcquireAsync(cancellationToken).ConfigureAwait(false))
         {
-            return ImmutableArray<JournalRestoreOutcome>.Empty;
-        }
-
-        ImmutableArray<JournalRestoreOutcome>.Builder outcomes = ImmutableArray.CreateBuilder<JournalRestoreOutcome>(document.Entries.Length);
-        ImmutableArray<JournalEntry>.Builder remaining = ImmutableArray.CreateBuilder<JournalEntry>();
-
-        foreach (JournalEntry entry in document.Entries)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            JournalRestoreOutcome outcome = RestoreOne(entry);
-            outcomes.Add(outcome);
-            if (outcome.Kind == JournalRestoreOutcomeKind.Failed)
+            JournalDocument document = await store.ReadAsync(cancellationToken).ConfigureAwait(false);
+            if (document.Entries.IsEmpty)
             {
-                remaining.Add(entry);
+                return ImmutableArray<JournalRestoreOutcome>.Empty;
             }
+
+            ImmutableArray<JournalRestoreOutcome>.Builder outcomes = ImmutableArray.CreateBuilder<JournalRestoreOutcome>(document.Entries.Length);
+            ImmutableArray<JournalEntry>.Builder remaining = ImmutableArray.CreateBuilder<JournalEntry>();
+
+            foreach (JournalEntry entry in document.Entries)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                JournalRestoreOutcome outcome = RestoreOne(entry);
+                outcomes.Add(outcome);
+                if (outcome.Kind == JournalRestoreOutcomeKind.Failed)
+                {
+                    remaining.Add(entry);
+                }
+            }
+
+            ImmutableArray<JournalEntry> remainingEntries = remaining.ToImmutable();
+            await store.WriteAsync(
+                new JournalDocument { Dirty = !remainingEntries.IsEmpty, Entries = remainingEntries },
+                cancellationToken).ConfigureAwait(false);
+
+            return outcomes.ToImmutable();
         }
-
-        ImmutableArray<JournalEntry> remainingEntries = remaining.ToImmutable();
-        await store.WriteAsync(
-            new JournalDocument { Dirty = !remainingEntries.IsEmpty, Entries = remainingEntries },
-            cancellationToken).ConfigureAwait(false);
-
-        return outcomes.ToImmutable();
     }
 
     private JournalRestoreOutcome RestoreOne(JournalEntry entry)

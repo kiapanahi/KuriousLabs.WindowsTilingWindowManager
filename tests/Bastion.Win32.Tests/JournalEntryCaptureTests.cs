@@ -23,9 +23,10 @@ public sealed class JournalEntryCaptureTests
         var capture = new JournalEntryCapture(pidReader, placementSystem, time);
         var identity = new WindowIdentity(WindowIdentityKind.ExePath, @"C:\Program Files\Contoso\app.exe");
 
-        bool succeeded = capture.TryCapture(s_hwnd, WorkspaceKey.Default, identity, out JournalEntry entry);
+        bool succeeded = capture.TryCapture(s_hwnd, WorkspaceKey.Default, identity, out JournalEntry? entry);
 
         Assert.True(succeeded);
+        Assert.NotNull(entry);
         Assert.Equal((long)(IntPtr)s_hwnd, entry.HwndValue);
         Assert.Equal(4242u, entry.ProcessId);
         Assert.Equal(WorkspaceKey.Default, entry.Workspace);

@@ -77,6 +77,21 @@ public sealed class HwndJournalStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task WriteAsyncCleansUpItsTempFileAndRethrowsWhenTheMoveFails()
+    {
+        // Force File.Move(tempPath, journalFilePath, overwrite: true) to fail by making the
+        // destination an existing directory rather than a file.
+        Directory.CreateDirectory(_journalPath);
+        var store = new HwndJournalStore(_journalPath);
+
+        await Assert.ThrowsAnyAsync<Exception>(
+            () => store.WriteAsync(JournalDocument.Empty, TestContext.Current.CancellationToken));
+
+        string[] filesInDirectory = Directory.GetFiles(_directory, "*", SearchOption.AllDirectories);
+        Assert.DoesNotContain(filesInDirectory, f => f.EndsWith(".tmp", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task SecondWriteFullyReplacesTheFirstRatherThanMerging()
     {
         var store = new HwndJournalStore(_journalPath);

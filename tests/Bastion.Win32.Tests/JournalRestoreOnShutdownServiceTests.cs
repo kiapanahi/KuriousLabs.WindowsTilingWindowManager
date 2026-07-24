@@ -16,7 +16,8 @@ public sealed class JournalRestoreOnShutdownServiceTests
     public async Task StartAsyncCompletesImmediatelyWithoutTouchingTheJournal()
     {
         var store = new FakeHwndJournalStore();
-        var restorer = new HwndJournalRestorer(store, new FakeJournalPlacementSystem(), new FakeWindowProcessIdReader());
+        using var journalLock = new FakeHwndJournalLock();
+        var restorer = new HwndJournalRestorer(store, new FakeJournalPlacementSystem(), new FakeWindowProcessIdReader(), journalLock);
         var service = new JournalRestoreOnShutdownService(restorer);
 
         await service.StartAsync(TestContext.Current.CancellationToken);
@@ -41,7 +42,8 @@ public sealed class JournalRestoreOnShutdownServiceTests
         var pidReader = new FakeWindowProcessIdReader();
         pidReader.SetPid(hwnd, 42);
         var placementSystem = new FakeJournalPlacementSystem();
-        var restorer = new HwndJournalRestorer(store, placementSystem, pidReader);
+        using var journalLock = new FakeHwndJournalLock();
+        var restorer = new HwndJournalRestorer(store, placementSystem, pidReader, journalLock);
         var service = new JournalRestoreOnShutdownService(restorer);
 
         await service.StopAsync(TestContext.Current.CancellationToken);
@@ -56,7 +58,8 @@ public sealed class JournalRestoreOnShutdownServiceTests
     [Fact]
     public async Task StopAsyncSwallowsAFailedRestoreRatherThanPropagating()
     {
-        var restorer = new HwndJournalRestorer(new ThrowingReadStore(), new FakeJournalPlacementSystem(), new FakeWindowProcessIdReader());
+        using var journalLock = new FakeHwndJournalLock();
+        var restorer = new HwndJournalRestorer(new ThrowingReadStore(), new FakeJournalPlacementSystem(), new FakeWindowProcessIdReader(), journalLock);
         var service = new JournalRestoreOnShutdownService(restorer);
 
         // Must not throw -- a broken journal is not allowed to prevent bastiond from exiting.

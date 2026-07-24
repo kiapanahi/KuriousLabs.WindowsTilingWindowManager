@@ -29,11 +29,36 @@ namespace Bastion.Win32;
 /// callable methods.
 /// </para>
 /// <para>
+/// <b>Preserve the first entry per window (Codex review finding on this PR).</b> A window can be
+/// hidden more than once in a session (e.g. switched away from, restored, switched away from
+/// again). Appending unconditionally on every call would record the window's <em>Bastion-managed</em>
+/// placement at the second hide as if it were "pre-management" state — <see cref="HwndJournalRestorer"/>
+/// replays entries in journal order, so a crash between the second hide and its own restore would
+/// apply the true original placement and then immediately overwrite it with the managed one before
+/// dropping both rows, defeating the entire point of "pre-management." <see cref="RecordThenActAsync"/>
+/// therefore only appends when no entry already exists for this exact window (matched on
+/// <see cref="JournalEntry.HwndValue"/> and <see cref="JournalEntry.ProcessId"/> together, the same
+/// pairing <see cref="HwndJournalRestorer"/> uses for its own HWND-recycling recheck) — the entry
+/// already on disk is left untouched, since it already correctly captures the window's true
+/// pre-management placement, and the hide action still proceeds normally.
+/// </para>
+/// <para>
+/// <b>Cross-process serialization (Codex review finding on this PR).</b> The whole read-decide-write
+/// journal step <em>and</em> the hide action are performed while holding <paramref name="journalLock"/> —
+/// not just the file I/O. Without this, <c>bastionc restore-windows</c> running concurrently in a
+/// different process could read the just-written entry and force-restore it (clearing the entry as
+/// "handled") <em>before</em> this method's own hide action has actually run, leaving the window
+/// hidden immediately afterward with no journal row left to recover it. Holding the lock across the
+/// entire method — including the hide call — means a concurrent restorer either runs to completion
+/// entirely before this method starts (seeing no entry to race against) or blocks until this whole
+/// "journal, then hide" sequence has finished (at which point the window really is hidden, and
+/// restoring its entry is correct). See <see cref="HwndJournalLock"/>'s own remarks for why this is
+/// a named <see cref="Semaphore"/>, not a <see cref="Mutex"/>.
+/// </para>
+/// <para>
 /// <b>Read-modify-write, not "caller hands in the whole document."</b> This keeps the API usable by
 /// a future one-window-at-a-time hide loop (issue #15's likely shape) without that caller having to
-/// hand-manage <see cref="JournalDocument"/> state itself. <see cref="IHwndJournalStore"/> is
-/// documented not thread-safe / sequential-only (matching this type's own single-caller
-/// expectation), so no lock is taken around the read-modify-write here.
+/// hand-manage <see cref="JournalDocument"/> state itself.
 /// </para>
 /// </remarks>
 [SuppressMessage(
@@ -42,23 +67,34 @@ namespace Bastion.Win32;
     Justification = "Constructed by tests via InternalsVisibleTo today; intended to be called by " +
         "GitHub issue #15's Workspace Manager once Bastion-owned workspaces exist. Same documented " +
         "CA1812 false-positive shape as PlacementExecutor/Coalescer/WindowSystemAdapter.")]
-internal sealed class HwndJournalWriter(IHwndJournalStore store)
+internal sealed class HwndJournalWriter(IHwndJournalStore store, IHwndJournalLock journalLock)
 {
     /// <summary>
-    /// Appends <paramref name="entry"/> to the journal, marks it dirty, durably writes it, and
-    /// <em>only then</em> invokes <paramref name="action"/> — the write-ahead ordering contract
-    /// this type exists to provide. If the write throws, <paramref name="action"/> is never
-    /// invoked at all (a failed journal write must not be followed by an unrecorded hide).
+    /// If no entry already exists for this exact window, appends <paramref name="entry"/> to the
+    /// journal, marks it dirty, and durably writes it; either way, <em>only then</em> invokes
+    /// <paramref name="action"/> — the write-ahead ordering contract this type exists to provide.
+    /// The whole operation, including <paramref name="action"/>, runs under the cross-process
+    /// journal lock (see this type's remarks). If a journal write throws, <paramref name="action"/>
+    /// is never invoked at all (a failed journal write must not be followed by an unrecorded hide).
     /// </summary>
     public async Task RecordThenActAsync(JournalEntry entry, Func<CancellationToken, Task> action, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(entry);
         ArgumentNullException.ThrowIfNull(action);
 
-        JournalDocument current = await store.ReadAsync(cancellationToken).ConfigureAwait(false);
-        JournalDocument updated = current with { Dirty = true, Entries = current.Entries.Add(entry) };
-        await store.WriteAsync(updated, cancellationToken).ConfigureAwait(false);
+        using (await journalLock.AcquireAsync(cancellationToken).ConfigureAwait(false))
+        {
+            JournalDocument current = await store.ReadAsync(cancellationToken).ConfigureAwait(false);
 
-        await action(cancellationToken).ConfigureAwait(false);
+            bool alreadyJournaled = current.Entries.Any(
+                e => e.HwndValue == entry.HwndValue && e.ProcessId == entry.ProcessId);
+            if (!alreadyJournaled)
+            {
+                JournalDocument updated = current with { Dirty = true, Entries = current.Entries.Add(entry) };
+                await store.WriteAsync(updated, cancellationToken).ConfigureAwait(false);
+            }
+
+            await action(cancellationToken).ConfigureAwait(false);
+        }
     }
 }
