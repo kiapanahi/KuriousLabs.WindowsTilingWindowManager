@@ -199,6 +199,49 @@ public sealed class MinSizeConflictLadderTests
     }
 
     /// <summary>
+    /// Codex review finding on this PR: a three-tile row (Left | Middle | Right, all full height) --
+    /// Middle is equidistant (touching, zero gap) from both Left and Right, so both are geometrically
+    /// eligible donors. Left is deliberately already at its own required minimum (zero capacity to
+    /// give); Right has ample room. Before the fix, whichever of the two the single-candidate search
+    /// happened to land on first (deterministically Left, given insertion/iteration order) would be
+    /// the only one ever tried -- if that one lacked capacity, the redistribution was abandoned
+    /// entirely even though the other could have absorbed it, forcing an unnecessary step 2 overlap.
+    /// </summary>
+    [Fact]
+    public void StepOneTriesTheNextClosestDonorWhenTheClosestOneLacksCapacity()
+    {
+        var left = WindowId.FromOpaqueValue(0);
+        var middle = WindowId.FromOpaqueValue(1);
+        var right = WindowId.FromOpaqueValue(2);
+
+        List<WindowPlacement> placements =
+        [
+            new(left, new Rect(0, 0, 50, 100)),
+            new(middle, new Rect(50, 0, 150, 100)),
+            new(right, new Rect(150, 0, 450, 100)),
+        ];
+        Dictionary<WindowId, LayoutConstraints> effectiveMinSizes = new()
+        {
+            [left] = new LayoutConstraints(50, 0), // Already exactly at its own minimum -- zero capacity to give.
+            [middle] = new LayoutConstraints(170, 0), // Deficit of 70 -- both Left and Right touch it at distance 0.
+        };
+
+        MinSizeConflictResult result = MinSizeConflictLadder.Resolve(
+            placements, s_noMinSize, effectiveMinSizes, new Rect(0, 0, 450, 100));
+
+        Assert.Empty(result.AutoFloats);
+        Assert.Empty(result.Overlaps); // Must succeed via Right -- no overlap needed at all.
+        Assert.Contains(result.Redistributions, r => r.WindowId == middle);
+
+        Rect leftBounds = result.Placements.Single(p => p.WindowId == left).Bounds;
+        Rect middleBounds = result.Placements.Single(p => p.WindowId == middle).Bounds;
+        Rect rightBounds = result.Placements.Single(p => p.WindowId == right).Bounds;
+        Assert.Equal(50.0, leftBounds.Width, precision: 6); // Untouched -- it never had capacity to give.
+        Assert.Equal(170.0, middleBounds.Width, precision: 6);
+        Assert.Equal(230.0, rightBounds.Width, precision: 6); // 300 - 70, the donor that actually gave.
+    }
+
+    /// <summary>
     /// Codex review finding on this PR: <see cref="MinSizeConflictResult.Redistributions"/>/
     /// <see cref="MinSizeConflictResult.Overlaps"/> must report each window's <em>final</em> bounds,
     /// not whatever it had at the moment its own turn resolved it. A's own turn resolves its width

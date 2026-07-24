@@ -42,17 +42,21 @@ namespace Bastion.Layout;
 /// engine.
 /// </para>
 /// <para>
-/// <b>Step 1's scope: single, full-span neighbor redistribution only.</b> "Redistributing along the
-/// split axis" is reinterpreted here, geometry-only, as: find the <em>one</em> other placement that
-/// shares the constrained window's full extent on the perpendicular axis and touches it along the
-/// deficient axis (the geometric signature of two tree siblings produced by a single split), and
-/// move exactly the deficit from one to the other. If no such single, full-span neighbor exists (the
-/// border is shared by more than one neighbor, only partially overlaps, or does not exist at all --
-/// e.g. the window is already alone along that edge), step 1 declines for that axis and steps 2/3
-/// decide instead. This is a deliberate scope boundary, not a missing case: DESIGN.md §6 itself only
-/// asks for a best-effort redistribution step before falling back to overlap/float, and a fully
-/// general N-neighbor border-redistribution solver would be exactly the kind of aggregate,
-/// cross-subtree computation <see cref="SplitTreeLayout"/>'s own design rejected.
+/// <b>Step 1's scope: single-donor redistribution only, but tried against every eligible donor.</b>
+/// "Redistributing along the split axis" is reinterpreted here, geometry-only, as: consider every
+/// other placement that shares the constrained window's full extent on the perpendicular axis,
+/// touches it along the deficient axis, and has nothing else physically between them (the geometric
+/// signature of a tree sibling produced by a single split); among those, try the closest first, and
+/// redistribute the exact deficit from the first one that has enough capacity to give it up without
+/// falling below its own required minimum. Trying every eligible donor (rather than stopping at the
+/// single closest one regardless of its capacity) is itself a fix -- Codex review finding on this
+/// PR: a nearer donor that is already at its own minimum must not block a farther donor with ample
+/// room. If none of them can absorb it, step 1 declines for that axis and steps 2/3 decide instead.
+/// Never redistributing from more than one donor <em>at a time</em> for a single deficit remains a
+/// deliberate scope boundary, not a missing case: DESIGN.md §6 itself only asks for a best-effort
+/// redistribution step before falling back to overlap/float, and a fully general N-donor
+/// simultaneous-split solver would be exactly the kind of aggregate, cross-subtree computation
+/// <see cref="SplitTreeLayout"/>'s own design rejected.
 /// </para>
 /// <para>
 /// <b>Where the per-window minimums come from is deliberately this type's caller's problem, not this
@@ -251,13 +255,12 @@ public static class MinSizeConflictLadder
             $"Window requires at least {required.MinWidth:0}x{required.MinHeight:0}px, exceeding the tolerable share of the {workArea.Width:0}x{workArea.Height:0}px work area — floated.");
 
     /// <summary>
-    /// Attempts step 1 for one axis of <paramref name="id"/>'s deficit: find the single, full-span
-    /// neighbor along <paramref name="axis"/> (<see cref="TryFindFullSpanNeighbor"/>) and, if
-    /// shrinking it by <paramref name="deficit"/> would not push it below its own required minimum,
-    /// move exactly that much space from the neighbor to <paramref name="id"/>. Mutates
+    /// Attempts step 1 for one axis of <paramref name="id"/>'s deficit: find the closest eligible
+    /// donor (<see cref="TryFindDonor"/>, which already verified capacity) and move exactly
+    /// <paramref name="deficit"/> from it to <paramref name="id"/>. Mutates
     /// <paramref name="working"/> in place and returns <see langword="true"/> on success; leaves it
-    /// untouched and returns <see langword="false"/> on failure (falling through to steps 2/3 is the
-    /// caller's job).
+    /// untouched and returns <see langword="false"/> if no eligible donor exists at all (falling
+    /// through to steps 2/3 is the caller's job).
     /// </summary>
     private static bool TryRedistribute(
         Dictionary<WindowId, Rect> working,
@@ -268,44 +271,34 @@ public static class MinSizeConflictLadder
         IReadOnlyDictionary<WindowId, LayoutConstraints> effectiveMinSizes)
     {
         Rect current = working[id];
-        if (!TryFindFullSpanNeighbor(working, id, current, axis, out WindowId neighborId, out bool neighborIsAfter))
+        if (!TryFindDonor(working, id, current, axis, deficit, defaultMinimum, effectiveMinSizes, out WindowId donorId, out bool donorIsAfter))
         {
             return false;
         }
 
-        Rect neighborRect = working[neighborId];
-        LayoutConstraints neighborRequired = Required(neighborId, defaultMinimum, effectiveMinSizes);
-        double neighborRequiredSize = axis == SplitOrientation.Horizontal ? neighborRequired.MinWidth : neighborRequired.MinHeight;
-        double neighborCurrentSize = axis == SplitOrientation.Horizontal ? neighborRect.Width : neighborRect.Height;
-        double neighborSizeAfterShrink = neighborCurrentSize - deficit;
-
-        if (neighborSizeAfterShrink <= 0 || neighborSizeAfterShrink < neighborRequiredSize - Epsilon)
-        {
-            // The axis cannot absorb it -- steps 2/3 decide instead.
-            return false;
-        }
-
-        if (neighborIsAfter)
+        Rect donorRect = working[donorId];
+        if (donorIsAfter)
         {
             working[id] = AdjustEdge(current, axis, isLeadingEdge: false, delta: deficit);
-            working[neighborId] = AdjustEdge(neighborRect, axis, isLeadingEdge: true, delta: deficit);
+            working[donorId] = AdjustEdge(donorRect, axis, isLeadingEdge: true, delta: deficit);
         }
         else
         {
             working[id] = AdjustEdge(current, axis, isLeadingEdge: true, delta: -deficit);
-            working[neighborId] = AdjustEdge(neighborRect, axis, isLeadingEdge: false, delta: -deficit);
+            working[donorId] = AdjustEdge(donorRect, axis, isLeadingEdge: false, delta: -deficit);
         }
 
         return true;
     }
 
     /// <summary>
-    /// Searches <paramref name="working"/> for the closest other placement that is full-span
-    /// adjacent to <paramref name="current"/> along <paramref name="axis"/>, on either side, with
-    /// nothing else occupying the space between them. Returns <see langword="false"/> if none
-    /// exists.
+    /// Searches <paramref name="working"/> for every other placement that is full-span adjacent to
+    /// <paramref name="current"/> along <paramref name="axis"/> (either side) with nothing else
+    /// occupying the space between them, and returns the closest one that also has enough capacity
+    /// to give up <paramref name="deficit"/> without falling below its own required minimum.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// A full-span match alone is not sufficient (Codex review finding on this PR): in, say, a
     /// horizontal layout whose middle subtree is itself split vertically, the two full-height
     /// tiles flanking that middle subtree both satisfy <see cref="IsFullSpanNeighbor"/> with each
@@ -313,22 +306,51 @@ public static class MinSizeConflictLadder
     /// either flanking tile as "adjacent" on the strength of a merely-nonnegative gap distance
     /// would grow one of them straight through the middle tiles, corrupting them, while this
     /// method's caller believes it just performed a clean, non-overlapping redistribution. Every
-    /// candidate is therefore additionally checked via <see cref="IsAnyOtherPlacementBetween"/>
-    /// before being accepted, regardless of how its raw gap distance compares to the current best.
+    /// candidate is therefore additionally checked via <see cref="IsAnyOtherPlacementBetween"/>.
+    /// </para>
+    /// <para>
+    /// Capacity alone does not stop the search at the first geometrically-eligible candidate either
+    /// (a second Codex review finding on this PR): every eligible candidate is collected and ordered
+    /// closest-first, then each is tried in turn until one has enough room to give up the deficit --
+    /// a nearer donor already at its own required minimum must not block a farther donor with ample
+    /// space to spare.
+    /// </para>
     /// </remarks>
-    private static bool TryFindFullSpanNeighbor(
+    private static bool TryFindDonor(
         Dictionary<WindowId, Rect> working,
         WindowId id,
         Rect current,
         SplitOrientation axis,
-        out WindowId neighborId,
-        out bool neighborIsAfter)
+        double deficit,
+        LayoutConstraints defaultMinimum,
+        IReadOnlyDictionary<WindowId, LayoutConstraints> effectiveMinSizes,
+        out WindowId donorId,
+        out bool donorIsAfter)
     {
-        bool found = false;
-        double bestDistance = double.PositiveInfinity;
-        neighborId = default;
-        neighborIsAfter = false;
+        List<(WindowId Id, bool IsAfter, double Distance)> candidates = FindEligibleCandidates(working, id, current, axis);
+        candidates.Sort(static (x, y) => x.Distance.CompareTo(y.Distance));
 
+        foreach ((WindowId candidateId, bool isAfter, _) in candidates)
+        {
+            LayoutConstraints candidateRequired = Required(candidateId, defaultMinimum, effectiveMinSizes);
+            if (HasCapacity(working[candidateId], axis, deficit, candidateRequired))
+            {
+                donorId = candidateId;
+                donorIsAfter = isAfter;
+                return true;
+            }
+        }
+
+        donorId = default;
+        donorIsAfter = false;
+        return false;
+    }
+
+    /// <summary>Every other placement in <paramref name="working"/> that is geometrically eligible (full-span, unobstructed) to donate along <paramref name="axis"/>, with its signed distance and side.</summary>
+    private static List<(WindowId Id, bool IsAfter, double Distance)> FindEligibleCandidates(
+        Dictionary<WindowId, Rect> working, WindowId id, Rect current, SplitOrientation axis)
+    {
+        List<(WindowId Id, bool IsAfter, double Distance)> candidates = [];
         foreach (KeyValuePair<WindowId, Rect> candidate in working)
         {
             if (candidate.Key == id || !IsFullSpanNeighbor(current, candidate.Value, axis))
@@ -339,18 +361,27 @@ public static class MinSizeConflictLadder
             double gapAfter = axis == SplitOrientation.Horizontal ? candidate.Value.Left - current.Right : candidate.Value.Top - current.Bottom;
             double gapBefore = axis == SplitOrientation.Horizontal ? current.Left - candidate.Value.Right : current.Top - candidate.Value.Bottom;
 
-            if (gapAfter >= -Epsilon && gapAfter < bestDistance && !IsAnyOtherPlacementBetween(working, id, candidate.Key, current, candidate.Value, axis, isAfter: true))
+            if (gapAfter >= -Epsilon && !IsAnyOtherPlacementBetween(working, id, candidate.Key, current, candidate.Value, axis, isAfter: true))
             {
-                (bestDistance, neighborId, neighborIsAfter, found) = (gapAfter, candidate.Key, true, true);
+                candidates.Add((candidate.Key, true, gapAfter));
             }
 
-            if (gapBefore >= -Epsilon && gapBefore < bestDistance && !IsAnyOtherPlacementBetween(working, id, candidate.Key, current, candidate.Value, axis, isAfter: false))
+            if (gapBefore >= -Epsilon && !IsAnyOtherPlacementBetween(working, id, candidate.Key, current, candidate.Value, axis, isAfter: false))
             {
-                (bestDistance, neighborId, neighborIsAfter, found) = (gapBefore, candidate.Key, false, true);
+                candidates.Add((candidate.Key, false, gapBefore));
             }
         }
 
-        return found;
+        return candidates;
+    }
+
+    /// <summary>Whether <paramref name="candidateRect"/> can give up <paramref name="deficit"/> along <paramref name="axis"/> without falling below <paramref name="candidateRequired"/> (or below zero).</summary>
+    private static bool HasCapacity(Rect candidateRect, SplitOrientation axis, double deficit, LayoutConstraints candidateRequired)
+    {
+        double requiredSize = axis == SplitOrientation.Horizontal ? candidateRequired.MinWidth : candidateRequired.MinHeight;
+        double currentSize = axis == SplitOrientation.Horizontal ? candidateRect.Width : candidateRect.Height;
+        double sizeAfterShrink = currentSize - deficit;
+        return sizeAfterShrink > 0 && sizeAfterShrink >= requiredSize - Epsilon;
     }
 
     /// <summary>Whether <paramref name="b"/> shares <paramref name="a"/>'s full extent on the axis perpendicular to <paramref name="axis"/> -- the geometric signature of two tree siblings from a single split.</summary>
@@ -364,9 +395,9 @@ public static class MinSizeConflictLadder
     /// occupies the strip of space between <paramref name="current"/> and
     /// <paramref name="candidateRect"/> along <paramref name="axis"/> -- if so, they are not truly
     /// adjacent regardless of how their raw gap distance compares to other candidates (see
-    /// <see cref="TryFindFullSpanNeighbor"/>'s own remarks for the counterexample this guards
-    /// against). Uses <see cref="Rect.IntersectsWith"/>'s existing strict-inequality semantics, so a
-    /// third placement that merely touches the bridge's boundary (the ordinary case for a
+    /// <see cref="TryFindDonor"/>'s own remarks for the counterexample this guards against). Uses
+    /// <see cref="Rect.IntersectsWith"/>'s existing strict-inequality semantics, so a third
+    /// placement that merely touches the bridge's boundary (the ordinary case for a
     /// genuinely-adjacent gap) is correctly not treated as an obstruction.
     /// </summary>
     private static bool IsAnyOtherPlacementBetween(
