@@ -156,6 +156,96 @@ public sealed class MinSizeConflictLadderTests
         Assert.Contains(result.Overlaps, o => o.WindowId == a); // A instead falls through to step 2.
     }
 
+    /// <summary>
+    /// Codex review finding on this PR: a full-span match alone is not sufficient for adjacency. In
+    /// a horizontal layout whose middle subtree is itself split vertically (MiddleTop/MiddleBottom),
+    /// Left and Right are both full-height and so both satisfy <c>IsFullSpanNeighbor</c> with each
+    /// other -- even though Middle physically separates them. Before the fix, Left would "borrow"
+    /// width straight through Middle, corrupting it, while being reported as a clean, non-overlapping
+    /// step 1 redistribution. Left's width requirement here is chosen so Right (the only full-span
+    /// candidate) has ample room to give up the deficit and satisfy the old (buggy) shrink guard --
+    /// isolating the obstruction check as the only thing that can still correctly decline it.
+    /// </summary>
+    [Fact]
+    public void StepOneNeverBorrowsAcrossAnObstructingThirdPlacement()
+    {
+        var left = WindowId.FromOpaqueValue(0);
+        var middleTop = WindowId.FromOpaqueValue(1);
+        var middleBottom = WindowId.FromOpaqueValue(2);
+        var right = WindowId.FromOpaqueValue(3);
+
+        List<WindowPlacement> placements =
+        [
+            new(left, new Rect(0, 0, 100, 100)),
+            new(middleTop, new Rect(100, 0, 250, 50)),
+            new(middleBottom, new Rect(100, 50, 250, 100)),
+            new(right, new Rect(250, 0, 400, 100)),
+        ];
+        Dictionary<WindowId, LayoutConstraints> effectiveMinSizes = new() { [left] = new LayoutConstraints(200, 0) };
+
+        MinSizeConflictResult result = MinSizeConflictLadder.Resolve(
+            placements, s_noMinSize, effectiveMinSizes, new Rect(0, 0, 400, 100));
+
+        // Step 1 must decline (Right is not really adjacent) -- Left instead falls through to step 2.
+        Assert.DoesNotContain(result.Redistributions, r => r.WindowId == left);
+        Assert.Contains(result.Overlaps, o => o.WindowId == left);
+
+        // Right, MiddleTop, and MiddleBottom must all be exactly as solved -- untouched by Left's
+        // step 2 growth (step 2 only ever grows the constrained window's own rect, never a
+        // neighbor's), proving no borrowing-through-the-middle occurred.
+        Assert.Equal(new Rect(250, 0, 400, 100), result.Placements.Single(p => p.WindowId == right).Bounds);
+        Assert.Equal(new Rect(100, 0, 250, 50), result.Placements.Single(p => p.WindowId == middleTop).Bounds);
+        Assert.Equal(new Rect(100, 50, 250, 100), result.Placements.Single(p => p.WindowId == middleBottom).Bounds);
+    }
+
+    /// <summary>
+    /// Codex review finding on this PR: <see cref="MinSizeConflictResult.Redistributions"/>/
+    /// <see cref="MinSizeConflictResult.Overlaps"/> must report each window's <em>final</em> bounds,
+    /// not whatever it had at the moment its own turn resolved it. A's own turn resolves its width
+    /// deficit by redistributing from B, growing A's right edge to x=130; D's later turn resolves
+    /// its own height deficit by redistributing from A -- D's own width (0-130) is deliberately
+    /// pre-aligned with what A grows into, so the two stay full-span vertical neighbors after A's
+    /// width changes -- shrinking A's height after A was already recorded on the width axis. The
+    /// <see cref="MinSizeConflictResult"/> invariant ("Overlaps/Redistributions' Bounds always agree
+    /// with Placements for the same window") must still hold.
+    /// </summary>
+    [Fact]
+    public void OutcomeBoundsReflectFinalStateNotTheSnapshotAtEachWindowsOwnProcessingTime()
+    {
+        var a = WindowId.FromOpaqueValue(0);
+        var b = WindowId.FromOpaqueValue(1);
+        var d = WindowId.FromOpaqueValue(2);
+        var e = WindowId.FromOpaqueValue(3);
+
+        List<WindowPlacement> placements =
+        [
+            new(a, new Rect(0, 0, 100, 50)), // top-left
+            new(b, new Rect(100, 0, 200, 50)), // top-right
+            new(d, new Rect(0, 50, 130, 100)), // bottom-left -- width (130) pre-aligned with what A grows into.
+            new(e, new Rect(130, 50, 200, 100)), // bottom-right
+        ];
+
+        Dictionary<WindowId, LayoutConstraints> effectiveMinSizes = new()
+        {
+            [a] = new LayoutConstraints(130, 0), // A's own turn: redistribute width from B.
+            [d] = new LayoutConstraints(0, 80),  // D's later turn: redistribute height from A.
+        };
+
+        MinSizeConflictResult result = MinSizeConflictLadder.Resolve(
+            placements, s_noMinSize, effectiveMinSizes, new Rect(0, 0, 200, 100));
+
+        Assert.Empty(result.AutoFloats);
+        Assert.Empty(result.Overlaps);
+        Assert.Contains(result.Redistributions, r => r.WindowId == a);
+        Assert.Contains(result.Redistributions, r => r.WindowId == d);
+
+        Rect aInRedistributions = result.Redistributions.Single(r => r.WindowId == a).Bounds;
+        Rect aInPlacements = result.Placements.Single(p => p.WindowId == a).Bounds;
+        Assert.Equal(aInPlacements, aInRedistributions); // The documented invariant this bug violated.
+        Assert.Equal(130.0, aInPlacements.Width, precision: 6); // From A's own turn, unaffected by D's later redistribution.
+        Assert.Equal(20.0, aInPlacements.Height, precision: 6); // 50 (original) - 30 (D's deficit), taken after A was already recorded.
+    }
+
     // --- Step 2: bounded overlap --------------------------------------------------------------
 
     [Fact]

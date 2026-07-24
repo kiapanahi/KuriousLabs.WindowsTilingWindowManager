@@ -118,22 +118,39 @@ public static class MinSizeConflictLadder
             working[placement.WindowId] = placement.Bounds;
         }
 
-        ImmutableArray<RedistributedPlacement>.Builder redistributions = ImmutableArray.CreateBuilder<RedistributedPlacement>();
-        ImmutableArray<BoundedOverlapPlacement>.Builder overlaps = ImmutableArray.CreateBuilder<BoundedOverlapPlacement>();
+        List<WindowId> redistributedIds = [];
+        List<WindowId> overlappedIds = [];
         ImmutableArray<AutoFloatDecision>.Builder autoFloats = ImmutableArray.CreateBuilder<AutoFloatDecision>();
 
         foreach (WindowPlacement placement in placements)
         {
-            ProcessWindow(working, placement.WindowId, defaultMinimum, effectiveMinSizes, workArea, resolvedOptions, redistributions, overlaps, autoFloats);
+            ProcessWindow(working, placement.WindowId, defaultMinimum, effectiveMinSizes, workArea, resolvedOptions, redistributedIds, overlappedIds, autoFloats);
         }
 
+        // Bounds for Redistributions/Overlaps are resolved from `working` only now, after every
+        // window has been processed -- never captured inline at each window's own processing time
+        // (Codex review finding on this PR): a window recorded here as redistributed/overlapped can
+        // still be mutated afterward by a LATER window's own successful step-1 redistribution
+        // (using it as a donor neighbor), which would otherwise leave these outcomes reporting
+        // stale bounds that disagree with what Placements ultimately records for the same window.
         return new MinSizeConflictResult
         {
             Placements = BuildFinalPlacements(placements, working),
-            Redistributions = redistributions.ToImmutable(),
-            Overlaps = overlaps.ToImmutable(),
+            Redistributions = BuildOutcomes(redistributedIds, working, static (id, bounds) => new RedistributedPlacement(id, bounds)),
+            Overlaps = BuildOutcomes(overlappedIds, working, static (id, bounds) => new BoundedOverlapPlacement(id, bounds)),
             AutoFloats = autoFloats.ToImmutable(),
         };
+    }
+
+    private static ImmutableArray<T> BuildOutcomes<T>(List<WindowId> ids, Dictionary<WindowId, Rect> working, Func<WindowId, Rect, T> factory)
+    {
+        ImmutableArray<T>.Builder builder = ImmutableArray.CreateBuilder<T>(ids.Count);
+        foreach (WindowId id in ids)
+        {
+            builder.Add(factory(id, working[id]));
+        }
+
+        return builder.ToImmutable();
     }
 
     /// <summary>
@@ -144,8 +161,10 @@ public static class MinSizeConflictLadder
     /// floated); otherwise auto-float (step 3) if the requirement is unreasonable relative to
     /// <paramref name="workArea"/>, else attempt step 1 on each deficient axis and fall back to
     /// step 2 (bounded overlap) for whatever step 1 could not resolve. Mutates
-    /// <paramref name="working"/> and appends to <paramref name="redistributions"/>/
-    /// <paramref name="overlaps"/>/<paramref name="autoFloats"/> as needed.
+    /// <paramref name="working"/> and records <paramref name="id"/>'s outcome in
+    /// <paramref name="redistributedIds"/>/<paramref name="overlappedIds"/>/
+    /// <paramref name="autoFloats"/> as needed (bounds for the first two are resolved by the caller
+    /// after every window has been processed, not here -- see <see cref="Resolve"/>'s remarks).
     /// </summary>
     private static void ProcessWindow(
         Dictionary<WindowId, Rect> working,
@@ -154,8 +173,8 @@ public static class MinSizeConflictLadder
         IReadOnlyDictionary<WindowId, LayoutConstraints> effectiveMinSizes,
         Rect workArea,
         MinSizeConflictLadderOptions options,
-        ImmutableArray<RedistributedPlacement>.Builder redistributions,
-        ImmutableArray<BoundedOverlapPlacement>.Builder overlaps,
+        List<WindowId> redistributedIds,
+        List<WindowId> overlappedIds,
         ImmutableArray<AutoFloatDecision>.Builder autoFloats)
     {
         LayoutConstraints required = Required(id, defaultMinimum, effectiveMinSizes);
@@ -189,13 +208,12 @@ public static class MinSizeConflictLadder
         bool stillDeficient = required.MinWidth - current.Width > Epsilon || required.MinHeight - current.Height > Epsilon;
         if (stillDeficient)
         {
-            Rect inflated = InflateToMinimum(current, required, workArea);
-            working[id] = inflated;
-            overlaps.Add(new BoundedOverlapPlacement(id, inflated));
+            working[id] = InflateToMinimum(current, required, workArea);
+            overlappedIds.Add(id);
         }
         else if (widthRedistributed || heightRedistributed)
         {
-            redistributions.Add(new RedistributedPlacement(id, current));
+            redistributedIds.Add(id);
         }
     }
 
@@ -283,9 +301,21 @@ public static class MinSizeConflictLadder
 
     /// <summary>
     /// Searches <paramref name="working"/> for the closest other placement that is full-span
-    /// adjacent to <paramref name="current"/> along <paramref name="axis"/>, on either side.
-    /// Returns <see langword="false"/> if none exists.
+    /// adjacent to <paramref name="current"/> along <paramref name="axis"/>, on either side, with
+    /// nothing else occupying the space between them. Returns <see langword="false"/> if none
+    /// exists.
     /// </summary>
+    /// <remarks>
+    /// A full-span match alone is not sufficient (Codex review finding on this PR): in, say, a
+    /// horizontal layout whose middle subtree is itself split vertically, the two full-height
+    /// tiles flanking that middle subtree both satisfy <see cref="IsFullSpanNeighbor"/> with each
+    /// other even though the (non-full-span) middle tiles sit physically between them. Accepting
+    /// either flanking tile as "adjacent" on the strength of a merely-nonnegative gap distance
+    /// would grow one of them straight through the middle tiles, corrupting them, while this
+    /// method's caller believes it just performed a clean, non-overlapping redistribution. Every
+    /// candidate is therefore additionally checked via <see cref="IsAnyOtherPlacementBetween"/>
+    /// before being accepted, regardless of how its raw gap distance compares to the current best.
+    /// </remarks>
     private static bool TryFindFullSpanNeighbor(
         Dictionary<WindowId, Rect> working,
         WindowId id,
@@ -309,12 +339,12 @@ public static class MinSizeConflictLadder
             double gapAfter = axis == SplitOrientation.Horizontal ? candidate.Value.Left - current.Right : candidate.Value.Top - current.Bottom;
             double gapBefore = axis == SplitOrientation.Horizontal ? current.Left - candidate.Value.Right : current.Top - candidate.Value.Bottom;
 
-            if (gapAfter >= -Epsilon && gapAfter < bestDistance)
+            if (gapAfter >= -Epsilon && gapAfter < bestDistance && !IsAnyOtherPlacementBetween(working, id, candidate.Key, current, candidate.Value, axis, isAfter: true))
             {
                 (bestDistance, neighborId, neighborIsAfter, found) = (gapAfter, candidate.Key, true, true);
             }
 
-            if (gapBefore >= -Epsilon && gapBefore < bestDistance)
+            if (gapBefore >= -Epsilon && gapBefore < bestDistance && !IsAnyOtherPlacementBetween(working, id, candidate.Key, current, candidate.Value, axis, isAfter: false))
             {
                 (bestDistance, neighborId, neighborIsAfter, found) = (gapBefore, candidate.Key, false, true);
             }
@@ -328,6 +358,48 @@ public static class MinSizeConflictLadder
         axis == SplitOrientation.Horizontal
             ? AlmostEqual(a.Top, b.Top) && AlmostEqual(a.Bottom, b.Bottom)
             : AlmostEqual(a.Left, b.Left) && AlmostEqual(a.Right, b.Right);
+
+    /// <summary>
+    /// Whether some placement other than <paramref name="id"/>/<paramref name="candidateId"/>
+    /// occupies the strip of space between <paramref name="current"/> and
+    /// <paramref name="candidateRect"/> along <paramref name="axis"/> -- if so, they are not truly
+    /// adjacent regardless of how their raw gap distance compares to other candidates (see
+    /// <see cref="TryFindFullSpanNeighbor"/>'s own remarks for the counterexample this guards
+    /// against). Uses <see cref="Rect.IntersectsWith"/>'s existing strict-inequality semantics, so a
+    /// third placement that merely touches the bridge's boundary (the ordinary case for a
+    /// genuinely-adjacent gap) is correctly not treated as an obstruction.
+    /// </summary>
+    private static bool IsAnyOtherPlacementBetween(
+        Dictionary<WindowId, Rect> working,
+        WindowId id,
+        WindowId candidateId,
+        Rect current,
+        Rect candidateRect,
+        SplitOrientation axis,
+        bool isAfter)
+    {
+        Rect bridge = BuildBridge(current, candidateRect, axis, isAfter);
+        foreach (KeyValuePair<WindowId, Rect> other in working)
+        {
+            if (other.Key != id && other.Key != candidateId && bridge.IntersectsWith(other.Value))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>The rectangle spanning the space between <paramref name="current"/> and <paramref name="candidateRect"/> along <paramref name="axis"/>, at their shared (full-span) perpendicular extent.</summary>
+    private static Rect BuildBridge(Rect current, Rect candidateRect, SplitOrientation axis, bool isAfter) =>
+        (axis, isAfter) switch
+        {
+            (SplitOrientation.Horizontal, true) => new Rect(current.Right, current.Top, candidateRect.Left, current.Bottom),
+            (SplitOrientation.Horizontal, false) => new Rect(candidateRect.Right, current.Top, current.Left, current.Bottom),
+            (SplitOrientation.Vertical, true) => new Rect(current.Left, current.Bottom, current.Right, candidateRect.Top),
+            (SplitOrientation.Vertical, false) => new Rect(current.Left, candidateRect.Bottom, current.Right, current.Top),
+            _ => throw new UnreachableException(),
+        };
 
     /// <summary>Shifts one edge of <paramref name="rect"/> along <paramref name="axis"/> by <paramref name="delta"/> (positive = further in the increasing-coordinate direction).</summary>
     private static Rect AdjustEdge(Rect rect, SplitOrientation axis, bool isLeadingEdge, double delta) =>
