@@ -66,6 +66,28 @@ namespace Bastion.Core;
 /// minimum for a user-resizable window, so this cache treats the seed as a hard floor rather than a
 /// mere default.
 /// </para>
+/// <para>
+/// <b>Declined finding: durable, cross-daemon-restart persistence (Codex review finding on this
+/// PR).</b> <see cref="_learned"/> is an ordinary in-memory <see cref="Dictionary{TKey, TValue}"/>
+/// with no disk-backed hydration/save hooks, so restarting <c>bastiond</c> resets every rule key
+/// back to <see cref="SystemFloor"/>. This is a deliberate scope boundary, not an oversight, for two
+/// reasons. First, this issue's own acceptance criteria asks for a cache keyed "per-rule-key (not
+/// per-HWND — must survive window recycling)" — read literally, that phrase is about surviving
+/// <em>HWND recycling within one running daemon session</em> (the reason for keying by
+/// <see cref="RuleKey"/> instead of <c>WindowId</c>/HWND at all — DESIGN.md §9's own "HWND recycling"
+/// row is exactly this concern), not about surviving a full process restart; nothing in the
+/// acceptance criteria names a file path, a serialization format, or restart-survival. Second, this
+/// type deliberately mirrors <see cref="Reconciler"/>'s own established per-key +
+/// <see cref="TimeProvider"/> bookkeeping pattern (its reassert-budget dictionary, GitHub issue #4,
+/// already merged and reviewed) — an in-memory-only dictionary with the identical "no durable
+/// persistence" shape — and DESIGN.md's "persisted per rule-key with decay" reads, consistent with
+/// that precedent, as "retained across observations within the process's lifetime" (as opposed to a
+/// single momentary reading), not "survives a process restart." Durable persistence, if ever wanted,
+/// needs both a serialization format (naturally GitHub issue #9's JSONC/config surface) and a
+/// load-on-startup hook (issue #10's composition root) — both explicitly out of this issue's scope;
+/// building an ad hoc persistence mechanism now would likely need replacing once issue #9's real
+/// config system lands anyway.
+/// </para>
 /// </remarks>
 public sealed class EffectiveMinSizeCache
 {
