@@ -266,6 +266,43 @@ public sealed class ReconcilerTests
     }
 
     [Fact]
+    public async Task ReassertBudgetIsATrueTrailingWindowNotAFixedWindowThatDoublesAtItsBoundary()
+    {
+        // Codex review finding on this PR: a fixed window anchored at the first attempt (reset
+        // entirely once stale, rather than aging out one entry at a time) can let roughly double
+        // the configured budget through right at its own reset boundary. With budget=2 per 2s:
+        // attempts at t=0ms and t=1990ms exhaust it; a fixed-window implementation would then
+        // reset fully at t=2010ms (since 2010-0 >= 2000) and wrongly allow BOTH a 3rd attempt at
+        // 2010ms AND a 4th at 2020ms, even though [1990ms, 2020ms] spans only 30ms and already
+        // contains two recent attempts. A true trailing window allows the 3rd (only 1990ms is
+        // still "recent" once 0ms ages out) but must reject the 4th (both 1990ms and 2010ms are
+        // then "recent").
+        var time = new FakeTimeProvider();
+        var windowSystem = new FakeWindowSystem();
+        var options = new ReconcilerOptions { ReassertBudgetPerWindow = 2, ReassertBudgetWindow = TimeSpan.FromSeconds(2) };
+        using var reconciler = new Reconciler(windowSystem, new FakeLayoutEngine(), time, options);
+        reconciler.SetWorkspace(WorkspaceKey.Default, s_workArea);
+        var windowId = WindowId.FromOpaqueValue(1);
+        var neverConvergingRect = new Rect(0, 0, 10, 10);
+        windowSystem.Windows.Add(new ObservedWindow(windowId, neverConvergingRect, neverConvergingRect, IsCloaked: false, IsIconic: false, IsZoomed: false));
+
+        ImmutableArray<PlacementInstruction> atZeroMs = await reconciler.ConvergeOnceAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(PlacementAction.Move, Assert.Single(atZeroMs).Action);
+
+        time.Advance(TimeSpan.FromMilliseconds(1990));
+        ImmutableArray<PlacementInstruction> at1990Ms = await reconciler.ConvergeOnceAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(PlacementAction.Move, Assert.Single(at1990Ms).Action);
+
+        time.Advance(TimeSpan.FromMilliseconds(20)); // now at 2010ms
+        ImmutableArray<PlacementInstruction> at2010Ms = await reconciler.ConvergeOnceAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(PlacementAction.Move, Assert.Single(at2010Ms).Action); // correct: only 1990ms is still "recent"
+
+        time.Advance(TimeSpan.FromMilliseconds(10)); // now at 2020ms
+        ImmutableArray<PlacementInstruction> at2020Ms = await reconciler.ConvergeOnceAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(PlacementAction.Untile, Assert.Single(at2020Ms).Action); // both 1990ms and 2010ms are "recent" -- reject
+    }
+
+    [Fact]
     public async Task WithinToleranceObservedRectDoesNotConsumeAnyReassertBudget()
     {
         var time = new FakeTimeProvider();

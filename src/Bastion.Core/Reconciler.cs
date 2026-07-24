@@ -16,14 +16,21 @@ namespace Bastion.Core;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Single-threaded-actor invariant, enforced, not assumed.</b> <see cref="ConvergeOnceAsync"/>
-/// serializes on a <see cref="SemaphoreSlim"/> (mutual exclusion across an
-/// <see langword="await"/> boundary, never a <see cref="System.Threading.Lock"/>, which cannot be
-/// held across one) so a caller invoking it directly (e.g. a test, or a future distrust-escalation
-/// path) while <see cref="RunAsync"/> is also running can never interleave two convergence passes'
-/// state mutations. DESIGN.md §3 states this invariant architecturally ("All state mutation flows
-/// through the single-threaded Reconciler actor"); this type makes it structurally true rather
-/// than trusting every caller to serialize their own calls.
+/// <b>Single-threaded-actor invariant, enforced, not assumed, via two complementary locks.</b>
+/// <see cref="ConvergeOnceAsync"/> serializes whole passes on a <see cref="SemaphoreSlim"/> (mutual
+/// exclusion across an <see langword="await"/> boundary, never a <see cref="System.Threading.Lock"/>,
+/// which cannot be held across one) so a caller invoking it directly (e.g. a test, or a future
+/// distrust-escalation path) while <see cref="RunAsync"/> is also running can never let two passes'
+/// <see cref="IWindowSystem.ReadAllAsync"/> calls or state mutations interleave. Separately, every
+/// actual read-modify-write of <see cref="DesiredState"/> — <see cref="ConvergeOnceAsync"/>'s own
+/// post-await synchronous body <em>and</em> <see cref="SetWorkspace"/>, which never awaits at all
+/// and so is never covered by the semaphore — additionally serializes on a
+/// <see cref="System.Threading.Lock"/>, closing a race a Codex review finding on this PR identified
+/// between a concurrent <see cref="SetWorkspace"/> call (e.g. a future monitor-topology-service
+/// reacting to a display change, GitHub issue #16) and an in-flight convergence pass. DESIGN.md §3
+/// states the overall invariant architecturally ("All state mutation flows through the
+/// single-threaded Reconciler actor"); these two locks together make it structurally true for
+/// every mutating entry point, not just <see cref="ConvergeOnceAsync"/> in isolation.
 /// </para>
 /// <para>
 /// <b>Purity boundary.</b> This type has zero Win32/COM surface (pure-core skill): it depends only
@@ -68,6 +75,18 @@ public sealed class Reconciler : IDisposable
     private readonly ReconcilerOptions _options;
     private readonly Channel<byte> _wakeChannel = Channel.CreateBounded<byte>(s_wakeChannelOptions);
     private readonly SemaphoreSlim _convergenceGate = new(1, 1);
+
+    // Guards every read-modify-write of DesiredState (and the reassert-budget dictionary, which is
+    // only ever touched from the same critical sections) -- SetWorkspace's own mutation and
+    // ConvergeOnceAsync's post-await synchronous body both take this lock, closing the race a
+    // Codex review finding on this PR identified: without it, a caller invoking SetWorkspace (e.g.
+    // a future monitor-topology-service reacting to a display change, GitHub issue #16) from a
+    // different thread while a convergence pass is concurrently past its own await could lose
+    // either side's update. Never held across an await (System.Threading.Lock cannot be) --
+    // _convergenceGate alone still serializes whole passes, including the awaited
+    // IWindowSystem.ReadAllAsync call this lock never wraps.
+    private readonly Lock _stateLock = new();
+
     private readonly Dictionary<WindowId, ReassertBudgetState> _reassertBudgets = [];
     private bool _disposed;
 
@@ -134,17 +153,22 @@ public sealed class Reconciler : IDisposable
     /// area/constraints/gaps. v0.1 has no monitor topology service (GitHub issue #16) to discover
     /// this automatically, so callers (the eventual composition root, GitHub issue #10; tests here)
     /// supply it directly. An existing workspace's window list is preserved across calls that only
-    /// change geometry.
+    /// change geometry. Safe to call from any thread, including concurrently with a running
+    /// <see cref="ConvergeOnceAsync"/>/<see cref="RunAsync"/> pass — see <see cref="_stateLock"/>'s
+    /// own remarks.
     /// </summary>
     public void SetWorkspace(WorkspaceKey key, Rect workArea, LayoutConstraints constraints = default, LayoutGaps gaps = default)
     {
-        ImmutableArray<WindowId> existingWindows = DesiredState.Workspaces.TryGetValue(key, out DesiredWorkspace? existing)
-            ? existing.Windows
-            : ImmutableArray<WindowId>.Empty;
+        lock (_stateLock)
+        {
+            ImmutableArray<WindowId> existingWindows = DesiredState.Workspaces.TryGetValue(key, out DesiredWorkspace? existing)
+                ? existing.Windows
+                : ImmutableArray<WindowId>.Empty;
 
-        DesiredState = DesiredState.WithWorkspace(
-            key,
-            new DesiredWorkspace { Windows = existingWindows, WorkArea = workArea, Constraints = constraints, Gaps = gaps });
+            DesiredState = DesiredState.WithWorkspace(
+                key,
+                new DesiredWorkspace { Windows = existingWindows, WorkArea = workArea, Constraints = constraints, Gaps = gaps });
+        }
     }
 
     /// <summary>
@@ -229,55 +253,78 @@ public sealed class Reconciler : IDisposable
         try
         {
             ImmutableArray<ObservedWindow> observed = await _windowSystem.ReadAllAsync(cancellationToken).ConfigureAwait(false);
-            ObservedState = observed;
 
-            DesiredState = SyncDesiredWindowSet(DesiredState, observed);
-            PruneReassertBudgets(observed);
-
-            Dictionary<WindowId, ObservedWindow> observedById = new(observed.Length);
-            foreach (ObservedWindow window in observed)
+            // Everything from here on is synchronous (ILayoutEngine.Solve is a pure, non-awaiting
+            // call per its own contract) -- held entirely under _stateLock, never across an await,
+            // so a concurrent SetWorkspace call can never interleave with this pass's own
+            // read-modify-write of DesiredState (see _stateLock's own remarks).
+            ImmutableArray<PlacementInstruction> plan;
+            lock (_stateLock)
             {
-                observedById[window.WindowId] = window;
-            }
+                ObservedState = observed;
+                DesiredState = SyncDesiredWindowSet(DesiredState, observed);
+                PruneReassertBudgets(observed);
 
-            ImmutableArray<PlacementInstruction>.Builder plan = ImmutableArray.CreateBuilder<PlacementInstruction>();
-
-            foreach (DesiredWorkspace workspace in DesiredState.Workspaces.Values)
-            {
-                if (workspace.Windows.IsEmpty)
+                Dictionary<WindowId, ObservedWindow> observedById = new(observed.Length);
+                foreach (ObservedWindow window in observed)
                 {
-                    continue;
+                    observedById[window.WindowId] = window;
                 }
 
-                IReadOnlyList<WindowPlacement> solved =
-                    _layoutEngine.Solve(workspace.Windows, workspace.WorkArea, workspace.Constraints, workspace.Gaps);
-
-                foreach (WindowPlacement placement in solved)
+                ImmutableArray<PlacementInstruction>.Builder builder = ImmutableArray.CreateBuilder<PlacementInstruction>();
+                foreach (DesiredWorkspace workspace in DesiredState.Workspaces.Values)
                 {
-                    if (!observedById.TryGetValue(placement.WindowId, out ObservedWindow observedWindow)
-                        || RectsMatch(placement.Bounds, observedWindow.FrameBounds))
-                    {
-                        continue;
-                    }
-
-                    if (TryConsumeReassertBudget(placement.WindowId))
-                    {
-                        plan.Add(PlacementInstruction.Move(placement.WindowId, placement.Bounds));
-                    }
-                    else
-                    {
-                        plan.Add(PlacementInstruction.Untile(placement.WindowId));
-                        DesiredState = DesiredState.WithWindowUntiled(placement.WindowId);
-                    }
+                    SolveAndDiffWorkspaceLocked(workspace, observedById, builder);
                 }
+
+                plan = builder.ToImmutable();
+                LastPlacementPlan = plan;
             }
 
-            LastPlacementPlan = plan.ToImmutable();
-            return LastPlacementPlan;
+            return plan;
         }
         finally
         {
             _convergenceGate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Solves <paramref name="workspace"/> and appends a <see cref="PlacementInstruction"/> for
+    /// every placement that doesn't already match its observed rect (per <see cref="RectsMatch"/>),
+    /// gated by the reassert budget. Caller must hold <see cref="_stateLock"/> — this both reads
+    /// and writes <see cref="DesiredState"/> (via <see cref="DesiredState.WithWindowUntiled"/>).
+    /// </summary>
+    private void SolveAndDiffWorkspaceLocked(
+        DesiredWorkspace workspace,
+        Dictionary<WindowId, ObservedWindow> observedById,
+        ImmutableArray<PlacementInstruction>.Builder plan)
+    {
+        if (workspace.Windows.IsEmpty)
+        {
+            return;
+        }
+
+        IReadOnlyList<WindowPlacement> solved =
+            _layoutEngine.Solve(workspace.Windows, workspace.WorkArea, workspace.Constraints, workspace.Gaps);
+
+        foreach (WindowPlacement placement in solved)
+        {
+            if (!observedById.TryGetValue(placement.WindowId, out ObservedWindow observedWindow)
+                || RectsMatch(placement.Bounds, observedWindow.FrameBounds))
+            {
+                continue;
+            }
+
+            if (TryConsumeReassertBudget(placement.WindowId))
+            {
+                plan.Add(PlacementInstruction.Move(placement.WindowId, placement.Bounds));
+            }
+            else
+            {
+                plan.Add(PlacementInstruction.Untile(placement.WindowId));
+                DesiredState = DesiredState.WithWindowUntiled(placement.WindowId);
+            }
         }
     }
 
@@ -414,31 +461,25 @@ public sealed class Reconciler : IDisposable
 
     /// <summary>
     /// Attempts to consume one unit of <paramref name="windowId"/>'s reassert budget (DESIGN.md
-    /// §3.4: "default 2 per 2-second window"), resetting the rolling window first if it has
-    /// elapsed since <see cref="_timeProvider"/> last saw it start. Returns <see langword="false"/>
-    /// once the budget is exhausted for the current window, signaling the caller to float the
-    /// window instead of planning another move.
+    /// §3.4: "default 2 per 2-second window") against a true trailing window — never more than
+    /// <see cref="ReconcilerOptions.ReassertBudgetPerWindow"/> attempts are ever considered "recent"
+    /// within any <see cref="ReconcilerOptions.ReassertBudgetWindow"/>-wide span ending "now,"
+    /// regardless of when the oldest currently-tracked attempt happened to start. A fixed window
+    /// anchored at the first attempt (reset entirely once stale, rather than aging out one entry at
+    /// a time) can let roughly double the configured budget through right at its own reset boundary
+    /// (Codex review finding on this PR) — this trailing-window form cannot, by construction.
+    /// Returns <see langword="false"/> once the budget is exhausted, signaling the caller to untile
+    /// the window instead of planning another move.
     /// </summary>
     private bool TryConsumeReassertBudget(WindowId windowId)
     {
-        DateTimeOffset now = _timeProvider.GetUtcNow();
         if (!_reassertBudgets.TryGetValue(windowId, out ReassertBudgetState? state))
         {
-            state = new ReassertBudgetState(now);
+            state = new ReassertBudgetState();
             _reassertBudgets[windowId] = state;
         }
-        else if (now - state.WindowStartUtc >= _options.ReassertBudgetWindow)
-        {
-            state.Reset(now);
-        }
 
-        if (state.UsedInWindow >= _options.ReassertBudgetPerWindow)
-        {
-            return false;
-        }
-
-        state.UsedInWindow++;
-        return true;
+        return state.TryConsume(_timeProvider.GetUtcNow(), _options.ReassertBudgetPerWindow, _options.ReassertBudgetWindow);
     }
 
     /// <summary>
@@ -457,17 +498,34 @@ public sealed class Reconciler : IDisposable
             && Math.Abs(desired.Bottom - observed.Bottom) <= tolerance;
     }
 
-    /// <summary>One managed window's rolling reassert-budget bookkeeping.</summary>
-    private sealed class ReassertBudgetState(DateTimeOffset windowStartUtc)
+    /// <summary>
+    /// One managed window's reassert-budget bookkeeping: a true trailing window over recent
+    /// attempt timestamps, bounded to at most <see cref="ReconcilerOptions.ReassertBudgetPerWindow"/>
+    /// entries at any moment (a tiny, typically-2-element queue — no unbounded growth risk).
+    /// </summary>
+    private sealed class ReassertBudgetState
     {
-        public int UsedInWindow { get; set; }
+        private readonly Queue<DateTimeOffset> _recentAttempts = new();
 
-        public DateTimeOffset WindowStartUtc { get; private set; } = windowStartUtc;
-
-        public void Reset(DateTimeOffset now)
+        /// <summary>
+        /// Prunes attempts older than <paramref name="window"/> relative to <paramref name="now"/>,
+        /// then attempts to record one more. Returns <see langword="false"/> without recording one
+        /// if <paramref name="maxAttempts"/> are already within the trailing window.
+        /// </summary>
+        public bool TryConsume(DateTimeOffset now, int maxAttempts, TimeSpan window)
         {
-            UsedInWindow = 0;
-            WindowStartUtc = now;
+            while (_recentAttempts.Count > 0 && now - _recentAttempts.Peek() >= window)
+            {
+                _recentAttempts.Dequeue();
+            }
+
+            if (_recentAttempts.Count >= maxAttempts)
+            {
+                return false;
+            }
+
+            _recentAttempts.Enqueue(now);
+            return true;
         }
     }
 }
