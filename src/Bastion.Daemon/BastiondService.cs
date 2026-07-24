@@ -1,4 +1,5 @@
 using System.Diagnostics.CodeAnalysis;
+using System.Reflection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -25,7 +26,10 @@ internal sealed partial class BastiondService(ILogger<BastiondService> logger) :
     /// <inheritdoc />
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        LogStarted();
+        string version = Assembly.GetExecutingAssembly()
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+            ?? "unknown";
+        LogStarted(version);
         try
         {
             // Placeholder: real work is event-driven (WinEvent hooks + IPC listeners), not a
@@ -42,8 +46,8 @@ internal sealed partial class BastiondService(ILogger<BastiondService> logger) :
 
     [LoggerMessage(
         Level = LogLevel.Information,
-        Message = "bastiond started (placeholder composition root; see DESIGN.md §3.1-§3.10).")]
-    private partial void LogStarted();
+        Message = "bastiond {Version} started (placeholder composition root; see DESIGN.md §3.1-§3.10).")]
+    private partial void LogStarted(string version);
 
     [LoggerMessage(
         Level = LogLevel.Information,

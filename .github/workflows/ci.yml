@@ -48,7 +48,12 @@ jobs:
     name: Build, test, format, publish (Windows)
     runs-on: windows-latest
     steps:
+      # fetch-depth: 0 (full history, including tags) — MinVer (quality-gates.md §9) needs the
+      # tag history to compute the product version; the default shallow clone has no tags and
+      # silently falls back to an untagged 0.0.0-alpha.0.<height>+<sha> version.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-dotnet@v4
         with:
           global-json-file: global.json
