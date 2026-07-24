@@ -70,6 +70,7 @@ public sealed class CompositionRootServiceCollectionExtensionsTests : IDisposabl
         builder.Services.AddBastionEventAndReconciliationPipeline();
         builder.Services.AddBastionInputPipeline();
         builder.Services.AddBastionMonitorTopologyStub();
+        builder.Services.AddBastionIpcServer(daemonVersion: "test-version");
 
         using IHost host = builder.Build();
 
@@ -78,10 +79,11 @@ public sealed class CompositionRootServiceCollectionExtensionsTests : IDisposabl
         // One hosted service per registration call across every AddBastionXxx/AddWindowRulesConfiguration
         // extension: journal restore; hot-reload + schema publisher; the default-workspace seed,
         // WinEvent pump, Coalescer, ReconcilerIntentPump, ReconcilerLoopService,
-        // PlacementExecutionPump; input pump; the monitor-topology stub. A mismatch here means
+        // PlacementExecutionPump; input pump; the monitor-topology stub; the IPC command server
+        // pump and the IPC broadcast server pump (GitHub issues #11/#12). A mismatch here means
         // either a missing registration or an accidental double-registration -- both real
         // composition-root bugs.
-        Assert.Equal(11, hostedServices.Count);
+        Assert.Equal(13, hostedServices.Count);
 
         HashSet<string> hostedServiceTypeNames = [.. hostedServices.Select(s => s.GetType().Name)];
         Assert.Contains("JournalRestoreOnShutdownService", hostedServiceTypeNames);
@@ -95,6 +97,8 @@ public sealed class CompositionRootServiceCollectionExtensionsTests : IDisposabl
         Assert.Contains("PlacementExecutionPump", hostedServiceTypeNames);
         Assert.Contains("InputPumpService", hostedServiceTypeNames);
         Assert.Contains("MonitorTopologyPlaceholderService", hostedServiceTypeNames);
+        Assert.Contains("IpcCommandServerPump", hostedServiceTypeNames);
+        Assert.Contains("IpcBroadcastServerPump", hostedServiceTypeNames);
     }
 
     public void Dispose()
