@@ -106,6 +106,8 @@ public sealed class MinSizeConflictLadderTests
 
         Assert.Empty(result.AutoFloats);
         Assert.Empty(result.Overlaps);
+        Assert.Contains(result.Redistributions, r => r.WindowId == a); // Codex review finding: successful step 1 is itself a tracked conflict.
+        Assert.True(result.HasAnyConflict);
         Rect aBounds = result.Placements.Single(p => p.WindowId == a).Bounds;
         Rect bBounds = result.Placements.Single(p => p.WindowId == b).Bounds;
         Assert.Equal(70.0, aBounds.Width, precision: 6);
@@ -126,6 +128,7 @@ public sealed class MinSizeConflictLadderTests
 
         Assert.Empty(result.AutoFloats);
         Assert.Empty(result.Overlaps);
+        Assert.Contains(result.Redistributions, r => r.WindowId == b);
         Rect bBounds = result.Placements.Single(p => p.WindowId == b).Bounds;
         Assert.Equal(70.0, bBounds.Width, precision: 6);
     }
@@ -236,6 +239,31 @@ public sealed class MinSizeConflictLadderTests
         Assert.Contains(result.Placements, p => p.WindowId == b); // The untouched sibling stays tiled.
     }
 
+    /// <summary>
+    /// Codex review finding on this PR: a window whose current tile already meets an oversized
+    /// per-window requirement must pass through unchanged -- the tolerable-fraction test is about
+    /// whether the <em>requirement</em> is reasonable, not a substitute for checking whether a
+    /// deficit exists at all. A monocle-style tile filling the whole work area is the canonical
+    /// case: its own effective minimum can legitimately exceed 90% of the work area's dimensions
+    /// without that ever being a real conflict.
+    /// </summary>
+    [Fact]
+    public void AnAlreadySatisfiedTileIsNeverFloatedEvenWhenItsRequirementExceedsTheTolerableFraction()
+    {
+        var a = WindowId.FromOpaqueValue(0);
+        List<WindowPlacement> placements = [new(a, new Rect(0, 0, 100, 100))];
+
+        // 95 > 0.9 * 100 on both axes -- would exceed the tolerable fraction -- but the tile is
+        // already 100x100, which comfortably satisfies it.
+        Dictionary<WindowId, LayoutConstraints> effectiveMinSizes = new() { [a] = new LayoutConstraints(95, 95) };
+
+        MinSizeConflictResult result = MinSizeConflictLadder.Resolve(
+            placements, s_noMinSize, effectiveMinSizes, new Rect(0, 0, 100, 100));
+
+        Assert.False(result.HasAnyConflict);
+        Assert.Equal(placements, result.Placements);
+    }
+
     [Fact]
     public void StepThreeIsReachableViaTheHeightAxisIndependentlyOfWidth()
     {
@@ -270,6 +298,7 @@ public sealed class MinSizeConflictLadderTests
 
         Assert.Empty(result.AutoFloats);
         Assert.Empty(result.Overlaps);
+        Assert.Contains(result.Redistributions, r => r.WindowId == first);
         Rect firstBounds = result.Placements.Single(p => p.WindowId == first).Bounds;
         Rect secondBounds = result.Placements.Single(p => p.WindowId == second).Bounds;
         Assert.Equal(150.0, firstBounds.Width, precision: 6);
@@ -305,7 +334,8 @@ public sealed class MinSizeConflictLadderTests
         return placedIds.Count + floatedIds.Count == inputIds.Count
             && !placedIds.Overlaps(floatedIds)
             && placedIds.SetEquals(inputIds.Except(floatedIds))
-            && result.Overlaps.All(o => placedIds.Contains(o.WindowId));
+            && result.Overlaps.All(o => placedIds.Contains(o.WindowId))
+            && result.Redistributions.All(r => placedIds.Contains(r.WindowId));
     }
 
     [Property]
@@ -319,6 +349,7 @@ public sealed class MinSizeConflictLadderTests
         MinSizeConflictResult second = MinSizeConflictLadder.Resolve(solved, s_noMinSize, effectiveMinSizes, workArea);
 
         return first.Placements.SequenceEqual(second.Placements)
+            && first.Redistributions.SequenceEqual(second.Redistributions)
             && first.Overlaps.SequenceEqual(second.Overlaps)
             && first.AutoFloats.SequenceEqual(second.AutoFloats);
     }

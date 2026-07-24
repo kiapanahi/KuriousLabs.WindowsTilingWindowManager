@@ -30,15 +30,29 @@ namespace Bastion.Core;
 /// standalone -- see that type's remarks).
 /// </para>
 /// <para>
-/// <b>High-water-mark with decay, not a raw overwrite.</b> <see cref="RecordClamp"/> never simply
-/// replaces the learned minimum with the freshly observed value -- it takes the larger of (the
-/// existing learned value, decayed for whatever time has elapsed since it was last updated) and
-/// (the fresh observation). A single anomalously-small clamp reading (plausible: a verify-after-move
-/// readback captures one specific requested target, not an exhaustive probe of the window's true
-/// minimum) can therefore never instantly undo previously-learned, larger evidence -- only the
-/// passage of real time (decay, uncorroborated by any new clamp) can shrink it back down. This
-/// directly implements DESIGN.md §6's "persisted per rule-key with decay so app updates can shrink
-/// it": an app update is a calendar-time event, not a single-observation event.
+/// <b><see cref="RecordClamp"/> takes independently-nullable per-axis values, not one
+/// <see cref="LayoutConstraints"/> blob (Codex review finding on this PR).</b> A verify-after-move
+/// readback's clamp detection (<c>PlacementOutcome.ClampedTo</c>) can trip on only one axis --
+/// e.g. a 400x800 request clamped to 500x800 means the app refused to shrink below 500 px of width,
+/// but says nothing about its minimum height, since 800 was simply what was requested and happened
+/// to be honored. If this method accepted a single whole-rect observation, a caller naively
+/// forwarding the entire clamped rect would misrecord the <em>unclamped</em> axis too -- teaching a
+/// permanent 800 px minimum height the app never actually demanded, which would later force
+/// unnecessary overlap or auto-float for a window that would gladly have accepted a shorter tile.
+/// Passing <see langword="null"/> for an axis that was not itself clamped is how a caller states "no
+/// new evidence for this axis" -- that axis's own learned value and decay clock are left completely
+/// untouched by the call (still free to decay normally against whatever it last learned), rather
+/// than being reset or grown from a value that was never a real constraint.
+/// </para>
+/// <para>
+/// <b>High-water-mark with decay, not a raw overwrite.</b> For whichever axis <em>is</em> supplied,
+/// <see cref="RecordClamp"/> never simply replaces the learned minimum with the freshly observed
+/// value -- it takes the larger of (that axis's existing learned value, decayed for whatever time
+/// has elapsed since it was last updated) and (the fresh observation). A single anomalously-small
+/// clamp reading can therefore never instantly undo previously-learned, larger evidence -- only the
+/// passage of real time (decay, uncorroborated by any new clamp on that axis) can shrink it back
+/// down. This directly implements DESIGN.md §6's "persisted per rule-key with decay so app updates
+/// can shrink it": an app update is a calendar-time event, not a single-observation event.
 /// </para>
 /// <para>
 /// <b><see cref="SystemFloor"/> is an absolute floor on every returned value, not merely a
@@ -102,12 +116,12 @@ public sealed class EffectiveMinSizeCache
 
     /// <summary>
     /// The current effective minimum size for <paramref name="ruleKey"/>: <see cref="SystemFloor"/>
-    /// if no clamp has ever been recorded for it, otherwise its learned value decayed for whatever
-    /// time has elapsed since the most recent <see cref="RecordClamp"/> call -- never below
-    /// <see cref="SystemFloor"/>. A pure read: never mutates any stored state, so repeated calls
-    /// with no intervening <see cref="RecordClamp"/> return a smoothly-shrinking sequence of values
-    /// as <paramref name="ruleKey"/>'s decay clock (driven by the constructor-injected
-    /// <see cref="TimeProvider"/>) advances.
+    /// on either axis that has never had a clamp recorded for it, otherwise that axis's learned
+    /// value decayed for whatever time has elapsed since its own most recent
+    /// <see cref="RecordClamp"/> call -- never below <see cref="SystemFloor"/>. A pure read: never
+    /// mutates any stored state, so repeated calls with no intervening <see cref="RecordClamp"/> for
+    /// an axis return a smoothly-shrinking sequence of values for it as <paramref name="ruleKey"/>'s
+    /// decay clock (driven by the constructor-injected <see cref="TimeProvider"/>) advances.
     /// </summary>
     public LayoutConstraints GetEffectiveMinSize(RuleKey ruleKey)
     {
@@ -116,42 +130,70 @@ public sealed class EffectiveMinSizeCache
             return SystemFloor;
         }
 
-        return Decay(state, _timeProvider.GetUtcNow());
+        DateTimeOffset now = _timeProvider.GetUtcNow();
+        double width = DecayAxis(state.CurrentMinWidth, SystemFloor.MinWidth, state.LastWidthUpdatedAt, now);
+        double height = DecayAxis(state.CurrentMinHeight, SystemFloor.MinHeight, state.LastHeightUpdatedAt, now);
+        return new LayoutConstraints(width, height);
     }
 
     /// <summary>
-    /// Records an observed clamp -- the Executor's verify-after-move readback, e.g.
-    /// <c>PlacementOutcome.ClampedTo</c> converted to a <see cref="LayoutConstraints"/>; call only
-    /// when a clamp genuinely occurred, not on every solved/requested size -- for
-    /// <paramref name="ruleKey"/>, growing its learned minimum to the larger of its already-decayed
-    /// current value and <paramref name="observedMinimum"/>, and resetting its decay clock to now.
+    /// Records an observed clamp -- e.g. from the Executor's verify-after-move readback
+    /// (<c>PlacementOutcome.ClampedTo</c>) -- for <paramref name="ruleKey"/>. Pass
+    /// <see langword="null"/> for whichever of <paramref name="clampedWidth"/>/
+    /// <paramref name="clampedHeight"/> was <em>not</em> itself clamped this observation (see this
+    /// type's remarks for why passing the whole verified rect regardless of which axis actually
+    /// clamped is a correctness bug, not a convenience) -- a <see langword="null"/> axis is left
+    /// completely untouched by this call. Passing <see langword="null"/> for both is a harmless
+    /// no-op (equivalent to not calling this method at all); callers should not do so deliberately,
+    /// since this method should only ever be invoked when at least one axis genuinely clamped.
     /// Returns the resulting effective minimum (equivalent to an immediately subsequent
     /// <see cref="GetEffectiveMinSize"/> call).
     /// </summary>
-    public LayoutConstraints RecordClamp(RuleKey ruleKey, LayoutConstraints observedMinimum)
+    public LayoutConstraints RecordClamp(RuleKey ruleKey, double? clampedWidth, double? clampedHeight)
     {
-        DateTimeOffset now = _timeProvider.GetUtcNow();
+        if (clampedWidth is { } w && (!double.IsFinite(w) || w < 0))
+        {
+            throw new ArgumentOutOfRangeException(nameof(clampedWidth), w, "clampedWidth must be finite and non-negative when supplied.");
+        }
 
+        if (clampedHeight is { } h && (!double.IsFinite(h) || h < 0))
+        {
+            throw new ArgumentOutOfRangeException(nameof(clampedHeight), h, "clampedHeight must be finite and non-negative when supplied.");
+        }
+
+        if (clampedWidth is null && clampedHeight is null)
+        {
+            return GetEffectiveMinSize(ruleKey);
+        }
+
+        DateTimeOffset now = _timeProvider.GetUtcNow();
         if (!_learned.TryGetValue(ruleKey, out LearnedState? state))
         {
             state = new LearnedState
             {
                 CurrentMinWidth = SystemFloor.MinWidth,
                 CurrentMinHeight = SystemFloor.MinHeight,
-                LastUpdatedAt = now,
+                LastWidthUpdatedAt = now,
+                LastHeightUpdatedAt = now,
             };
             _learned[ruleKey] = state;
         }
 
-        LayoutConstraints decayed = Decay(state, now);
-        double newWidth = Math.Max(decayed.MinWidth, Math.Max(SystemFloor.MinWidth, observedMinimum.MinWidth));
-        double newHeight = Math.Max(decayed.MinHeight, Math.Max(SystemFloor.MinHeight, observedMinimum.MinHeight));
+        if (clampedWidth is { } observedWidth)
+        {
+            double decayed = DecayAxis(state.CurrentMinWidth, SystemFloor.MinWidth, state.LastWidthUpdatedAt, now);
+            state.CurrentMinWidth = Math.Max(decayed, Math.Max(SystemFloor.MinWidth, observedWidth));
+            state.LastWidthUpdatedAt = now;
+        }
 
-        state.CurrentMinWidth = newWidth;
-        state.CurrentMinHeight = newHeight;
-        state.LastUpdatedAt = now;
+        if (clampedHeight is { } observedHeight)
+        {
+            double decayed = DecayAxis(state.CurrentMinHeight, SystemFloor.MinHeight, state.LastHeightUpdatedAt, now);
+            state.CurrentMinHeight = Math.Max(decayed, Math.Max(SystemFloor.MinHeight, observedHeight));
+            state.LastHeightUpdatedAt = now;
+        }
 
-        return new LayoutConstraints(newWidth, newHeight);
+        return GetEffectiveMinSize(ruleKey);
     }
 
     /// <summary>
@@ -166,30 +208,33 @@ public sealed class EffectiveMinSizeCache
     /// </summary>
     public void Purge(RuleKey ruleKey) => _learned.Remove(ruleKey);
 
-    private LayoutConstraints Decay(LearnedState state, DateTimeOffset now)
+    /// <summary>Decays a single axis's learned value toward <paramref name="floor"/> given how long it has been since <paramref name="lastUpdatedAt"/>.</summary>
+    private double DecayAxis(double current, double floor, DateTimeOffset lastUpdatedAt, DateTimeOffset now)
     {
-        TimeSpan elapsed = now - state.LastUpdatedAt;
+        TimeSpan elapsed = now - lastUpdatedAt;
 
         // A non-positive elapsed span (clock non-monotonicity, or reading immediately after a
         // RecordClamp at the same instant) must never flow into Math.Pow as a negative exponent --
         // that would GROW the excess instead of decaying it. Treat it as "no decay has occurred yet".
         double multiplier = elapsed <= TimeSpan.Zero ? 1.0 : Math.Pow(_options.DecayFactor, elapsed / _options.DecayInterval);
+        double decayed = floor + ((current - floor) * multiplier);
 
-        double width = SystemFloor.MinWidth + ((state.CurrentMinWidth - SystemFloor.MinWidth) * multiplier);
-        double height = SystemFloor.MinHeight + ((state.CurrentMinHeight - SystemFloor.MinHeight) * multiplier);
-
-        // Defensive floor against floating-point overshoot -- state.CurrentMinWidth/Height >=
-        // SystemFloor is an invariant RecordClamp maintains, and multiplier is always in (0, 1], so
-        // this should never actually engage; belt-and-braces only (matches SplitTreeLayout's own
-        // ClampRatio -> Math.Clamp precedent).
-        return new LayoutConstraints(Math.Max(SystemFloor.MinWidth, width), Math.Max(SystemFloor.MinHeight, height));
+        // Defensive floor against floating-point overshoot -- current >= floor is an invariant
+        // RecordClamp maintains, and multiplier is always in (0, 1], so this should never actually
+        // engage; belt-and-braces only (matches SplitTreeLayout's own ClampRatio -> Math.Clamp
+        // precedent).
+        return Math.Max(floor, decayed);
     }
 
-    /// <summary>One rule key's learned bookkeeping: the last-recorded (pre-decay) minimum and when it was recorded.</summary>
+    /// <summary>
+    /// One rule key's learned bookkeeping, tracked per axis so an observation on one axis never
+    /// disturbs the other's learned value or decay clock (see this type's remarks).
+    /// </summary>
     private sealed class LearnedState
     {
         public double CurrentMinWidth;
         public double CurrentMinHeight;
-        public DateTimeOffset LastUpdatedAt;
+        public DateTimeOffset LastWidthUpdatedAt;
+        public DateTimeOffset LastHeightUpdatedAt;
     }
 }

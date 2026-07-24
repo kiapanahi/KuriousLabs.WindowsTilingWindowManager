@@ -107,21 +107,19 @@ public sealed class EffectiveMinSizeCacheTests
     public void RecordClampGrowsTheLearnedMinimumAboveTheFloor()
     {
         var cache = new EffectiveMinSizeCache(s_systemFloor, new FakeTimeProvider());
-        var observed = new LayoutConstraints(800, 600);
 
-        LayoutConstraints result = cache.RecordClamp(s_ruleKey, observed);
+        LayoutConstraints result = cache.RecordClamp(s_ruleKey, clampedWidth: 800, clampedHeight: 600);
 
-        Assert.Equal(observed, result);
-        Assert.Equal(observed, cache.GetEffectiveMinSize(s_ruleKey));
+        Assert.Equal(new LayoutConstraints(800, 600), result);
+        Assert.Equal(new LayoutConstraints(800, 600), cache.GetEffectiveMinSize(s_ruleKey));
     }
 
     [Fact]
     public void RecordClampNeverGrowsAnAxisBelowTheSystemFloorEvenWhenObservedIsSmaller()
     {
         var cache = new EffectiveMinSizeCache(s_systemFloor, new FakeTimeProvider());
-        var smallerThanFloor = new LayoutConstraints(10, 10);
 
-        LayoutConstraints result = cache.RecordClamp(s_ruleKey, smallerThanFloor);
+        LayoutConstraints result = cache.RecordClamp(s_ruleKey, clampedWidth: 10, clampedHeight: 10);
 
         Assert.Equal(s_systemFloor, result);
     }
@@ -135,8 +133,8 @@ public sealed class EffectiveMinSizeCacheTests
         var time = new FakeTimeProvider();
         var cache = new EffectiveMinSizeCache(s_systemFloor, time);
 
-        cache.RecordClamp(s_ruleKey, new LayoutConstraints(800, 600));
-        LayoutConstraints afterSmallerClamp = cache.RecordClamp(s_ruleKey, new LayoutConstraints(200, 150));
+        cache.RecordClamp(s_ruleKey, clampedWidth: 800, clampedHeight: 600);
+        LayoutConstraints afterSmallerClamp = cache.RecordClamp(s_ruleKey, clampedWidth: 200, clampedHeight: 150);
 
         Assert.Equal(new LayoutConstraints(800, 600), afterSmallerClamp);
         Assert.Equal(new LayoutConstraints(800, 600), cache.GetEffectiveMinSize(s_ruleKey));
@@ -147,8 +145,8 @@ public sealed class EffectiveMinSizeCacheTests
     {
         var cache = new EffectiveMinSizeCache(s_systemFloor, new FakeTimeProvider());
 
-        cache.RecordClamp(s_ruleKey, new LayoutConstraints(800, 60));
-        LayoutConstraints result = cache.RecordClamp(s_ruleKey, new LayoutConstraints(120, 600));
+        cache.RecordClamp(s_ruleKey, clampedWidth: 800, clampedHeight: 60);
+        LayoutConstraints result = cache.RecordClamp(s_ruleKey, clampedWidth: 120, clampedHeight: 600);
 
         // Width's high-water mark (800) survives even though the second clamp's own width (120) was
         // smaller; height's high-water mark (600) is the new, larger value.
@@ -161,10 +159,71 @@ public sealed class EffectiveMinSizeCacheTests
         var cache = new EffectiveMinSizeCache(s_systemFloor, new FakeTimeProvider());
         var otherKey = new RuleKey("aumid:Contoso.Example_1.0.0.0_x64__abcdef");
 
-        cache.RecordClamp(s_ruleKey, new LayoutConstraints(900, 700));
+        cache.RecordClamp(s_ruleKey, clampedWidth: 900, clampedHeight: 700);
 
         Assert.Equal(new LayoutConstraints(900, 700), cache.GetEffectiveMinSize(s_ruleKey));
         Assert.Equal(s_systemFloor, cache.GetEffectiveMinSize(otherKey));
+    }
+
+    // --- Per-axis nullability (Codex review finding on this PR: a whole-rect ClampedTo readback
+    //     must never pollute an axis that was not itself clamped) --------------------------------
+
+    [Fact]
+    public void AnUnclampedAxisPassedAsNullIsNeverAffectedByARecordClampCall()
+    {
+        var cache = new EffectiveMinSizeCache(s_systemFloor, new FakeTimeProvider());
+
+        // Only width clamped this observation (e.g. a 400x800 request clamped to 500x800 -- the
+        // height of 800 was simply what was requested, not evidence of a real height floor).
+        LayoutConstraints result = cache.RecordClamp(s_ruleKey, clampedWidth: 500, clampedHeight: null);
+
+        Assert.Equal(500.0, result.MinWidth, precision: 6);
+        Assert.Equal(s_systemFloor.MinHeight, result.MinHeight, precision: 6); // Untouched -- still exactly the floor.
+    }
+
+    [Fact]
+    public void APreviouslyLearnedAxisSurvivesALaterCallThatOmitsIt()
+    {
+        var cache = new EffectiveMinSizeCache(s_systemFloor, new FakeTimeProvider());
+        cache.RecordClamp(s_ruleKey, clampedWidth: 500, clampedHeight: 700);
+
+        // A later observation only reconfirms height -- width's own learned value (and decay clock)
+        // must be left exactly as it was, not reset or discarded.
+        LayoutConstraints result = cache.RecordClamp(s_ruleKey, clampedWidth: null, clampedHeight: 750);
+
+        Assert.Equal(500.0, result.MinWidth, precision: 6);
+        Assert.Equal(750.0, result.MinHeight, precision: 6);
+    }
+
+    [Fact]
+    public void RecordClampWithBothAxesNullIsAHarmlessNoOp()
+    {
+        var cache = new EffectiveMinSizeCache(s_systemFloor, new FakeTimeProvider());
+        cache.RecordClamp(s_ruleKey, clampedWidth: 900, clampedHeight: 700);
+
+        LayoutConstraints result = cache.RecordClamp(s_ruleKey, clampedWidth: null, clampedHeight: null);
+
+        Assert.Equal(new LayoutConstraints(900, 700), result);
+    }
+
+    [Theory]
+    [InlineData(-1.0)]
+    [InlineData(double.NaN)]
+    [InlineData(double.PositiveInfinity)]
+    public void RecordClampRejectsAnInvalidClampedWidth(double invalidWidth)
+    {
+        var cache = new EffectiveMinSizeCache(s_systemFloor, new FakeTimeProvider());
+        Assert.Throws<ArgumentOutOfRangeException>(() => cache.RecordClamp(s_ruleKey, clampedWidth: invalidWidth, clampedHeight: null));
+    }
+
+    [Theory]
+    [InlineData(-1.0)]
+    [InlineData(double.NaN)]
+    [InlineData(double.PositiveInfinity)]
+    public void RecordClampRejectsAnInvalidClampedHeight(double invalidHeight)
+    {
+        var cache = new EffectiveMinSizeCache(s_systemFloor, new FakeTimeProvider());
+        Assert.Throws<ArgumentOutOfRangeException>(() => cache.RecordClamp(s_ruleKey, clampedWidth: null, clampedHeight: invalidHeight));
     }
 
     // --- Decay (acceptance criteria: decay mechanism; schedule recorded in EffectiveMinSizeCacheOptions) --
@@ -174,7 +233,7 @@ public sealed class EffectiveMinSizeCacheTests
     {
         var time = new FakeTimeProvider();
         var cache = new EffectiveMinSizeCache(s_systemFloor, time); // Default: 24h interval, 0.5 factor.
-        cache.RecordClamp(s_ruleKey, new LayoutConstraints(300, 50)); // Excess of 200 on width.
+        cache.RecordClamp(s_ruleKey, clampedWidth: 300, clampedHeight: 50); // Excess of 200 on width.
 
         time.Advance(EffectiveMinSizeCacheOptions.Default.DecayInterval);
 
@@ -187,7 +246,7 @@ public sealed class EffectiveMinSizeCacheTests
     {
         var time = new FakeTimeProvider();
         var cache = new EffectiveMinSizeCache(s_systemFloor, time);
-        cache.RecordClamp(s_ruleKey, new LayoutConstraints(10_000, 10_000));
+        cache.RecordClamp(s_ruleKey, clampedWidth: 10_000, clampedHeight: 10_000);
 
         time.Advance(TimeSpan.FromDays(365 * 10)); // Absurdly long -- must still floor, never go below.
 
@@ -204,7 +263,7 @@ public sealed class EffectiveMinSizeCacheTests
         var time = new FakeTimeProvider();
         var options = new EffectiveMinSizeCacheOptions { DecayFactor = 1.0, DecayInterval = TimeSpan.FromMinutes(1) };
         var cache = new EffectiveMinSizeCache(s_systemFloor, time, options);
-        cache.RecordClamp(s_ruleKey, new LayoutConstraints(800, 600));
+        cache.RecordClamp(s_ruleKey, clampedWidth: 800, clampedHeight: 600);
 
         time.Advance(TimeSpan.FromDays(3650));
 
@@ -219,7 +278,7 @@ public sealed class EffectiveMinSizeCacheTests
         // snapshot of the decayed value at the first read.
         var time = new FakeTimeProvider();
         var cache = new EffectiveMinSizeCache(s_systemFloor, time);
-        cache.RecordClamp(s_ruleKey, new LayoutConstraints(500, 50));
+        cache.RecordClamp(s_ruleKey, clampedWidth: 500, clampedHeight: 50);
 
         LayoutConstraints firstRead = cache.GetEffectiveMinSize(s_ruleKey);
         time.Advance(EffectiveMinSizeCacheOptions.Default.DecayInterval);
@@ -229,17 +288,35 @@ public sealed class EffectiveMinSizeCacheTests
     }
 
     [Fact]
+    public void DecayClocksAreIndependentPerAxis()
+    {
+        // Width is reconfirmed partway through the interval that would otherwise decay it; height
+        // is left alone and must decay on its own, unaffected schedule.
+        var time = new FakeTimeProvider();
+        var cache = new EffectiveMinSizeCache(s_systemFloor, time);
+        cache.RecordClamp(s_ruleKey, clampedWidth: 300, clampedHeight: 300); // Excess 200 on both axes.
+
+        time.Advance(TimeSpan.FromHours(12));
+        cache.RecordClamp(s_ruleKey, clampedWidth: 300, clampedHeight: null); // Only width reconfirmed.
+
+        time.Advance(TimeSpan.FromHours(12)); // Width's clock: 12h since reconfirmation. Height's clock: 24h since its only observation.
+
+        LayoutConstraints result = cache.GetEffectiveMinSize(s_ruleKey);
+        Assert.True(result.MinWidth > result.MinHeight, "Width (reconfirmed at the halfway point) should have decayed less than height (never reconfirmed).");
+    }
+
+    [Fact]
     public void RecordClampAfterDecayFoldsInTheAlreadyDecayedValueBeforeApplyingTheNewObservation()
     {
         var time = new FakeTimeProvider();
         var cache = new EffectiveMinSizeCache(s_systemFloor, time);
-        cache.RecordClamp(s_ruleKey, new LayoutConstraints(300, 50)); // Excess 200.
+        cache.RecordClamp(s_ruleKey, clampedWidth: 300, clampedHeight: 50); // Excess 200.
 
         time.Advance(EffectiveMinSizeCacheOptions.Default.DecayInterval); // Excess decays to 100 -> width 200.
 
         // A fresh clamp smaller than the pre-decay peak (300) but larger than the now-decayed value
         // (200) must still raise the learned minimum to the fresh observation.
-        LayoutConstraints result = cache.RecordClamp(s_ruleKey, new LayoutConstraints(250, 50));
+        LayoutConstraints result = cache.RecordClamp(s_ruleKey, clampedWidth: 250, clampedHeight: null);
         Assert.Equal(250.0, result.MinWidth, precision: 6);
     }
 
@@ -249,7 +326,7 @@ public sealed class EffectiveMinSizeCacheTests
     public void PurgeRevertsARuleKeyBackToTheSystemFloor()
     {
         var cache = new EffectiveMinSizeCache(s_systemFloor, new FakeTimeProvider());
-        cache.RecordClamp(s_ruleKey, new LayoutConstraints(800, 600));
+        cache.RecordClamp(s_ruleKey, clampedWidth: 800, clampedHeight: 600);
 
         cache.Purge(s_ruleKey);
 
@@ -281,7 +358,7 @@ public sealed class EffectiveMinSizeCacheTests
 
         // The cache has learned (from a prior clamp) that `constrained` needs 700px of width --
         // far more than the flat default the layout was originally solved with.
-        cache.RecordClamp(new RuleKey("exe:constrained.exe"), new LayoutConstraints(700, 20));
+        cache.RecordClamp(new RuleKey("exe:constrained.exe"), clampedWidth: 700, clampedHeight: null);
 
         var placements = new List<WindowPlacement>
         {
@@ -302,6 +379,7 @@ public sealed class EffectiveMinSizeCacheTests
 
         Assert.Empty(result.AutoFloats);
         Assert.Empty(result.Overlaps); // Redistribution alone should satisfy it -- the sibling has ample room to give.
+        Assert.Contains(result.Redistributions, r => r.WindowId == constrained);
         Rect constrainedBounds = result.Placements.Single(p => p.WindowId == constrained).Bounds;
         Assert.Equal(700.0, constrainedBounds.Width, precision: 6);
     }

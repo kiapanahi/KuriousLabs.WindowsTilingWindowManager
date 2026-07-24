@@ -118,28 +118,34 @@ public static class MinSizeConflictLadder
             working[placement.WindowId] = placement.Bounds;
         }
 
+        ImmutableArray<RedistributedPlacement>.Builder redistributions = ImmutableArray.CreateBuilder<RedistributedPlacement>();
         ImmutableArray<BoundedOverlapPlacement>.Builder overlaps = ImmutableArray.CreateBuilder<BoundedOverlapPlacement>();
         ImmutableArray<AutoFloatDecision>.Builder autoFloats = ImmutableArray.CreateBuilder<AutoFloatDecision>();
 
         foreach (WindowPlacement placement in placements)
         {
-            ProcessWindow(working, placement.WindowId, defaultMinimum, effectiveMinSizes, workArea, resolvedOptions, overlaps, autoFloats);
+            ProcessWindow(working, placement.WindowId, defaultMinimum, effectiveMinSizes, workArea, resolvedOptions, redistributions, overlaps, autoFloats);
         }
 
         return new MinSizeConflictResult
         {
             Placements = BuildFinalPlacements(placements, working),
+            Redistributions = redistributions.ToImmutable(),
             Overlaps = overlaps.ToImmutable(),
             AutoFloats = autoFloats.ToImmutable(),
         };
     }
 
     /// <summary>
-    /// Runs the whole ladder for one window: skip if already satisfied, auto-float (step 3) if its
-    /// requirement is unreasonable relative to <paramref name="workArea"/>, else attempt step 1 on
-    /// each deficient axis and fall back to step 2 (bounded overlap) for whatever step 1 could not
-    /// resolve. Mutates <paramref name="working"/> and appends to <paramref name="overlaps"/>/
-    /// <paramref name="autoFloats"/> as needed.
+    /// Runs the whole ladder for one window: skip entirely if its current tile already satisfies
+    /// its requirement (regardless of how large that requirement is relative to
+    /// <paramref name="workArea"/> -- Codex review finding on this PR: a lone/monocle tile that
+    /// already meets an oversized cache-learned minimum has no conflict to resolve and must not be
+    /// floated); otherwise auto-float (step 3) if the requirement is unreasonable relative to
+    /// <paramref name="workArea"/>, else attempt step 1 on each deficient axis and fall back to
+    /// step 2 (bounded overlap) for whatever step 1 could not resolve. Mutates
+    /// <paramref name="working"/> and appends to <paramref name="redistributions"/>/
+    /// <paramref name="overlaps"/>/<paramref name="autoFloats"/> as needed.
     /// </summary>
     private static void ProcessWindow(
         Dictionary<WindowId, Rect> working,
@@ -148,12 +154,24 @@ public static class MinSizeConflictLadder
         IReadOnlyDictionary<WindowId, LayoutConstraints> effectiveMinSizes,
         Rect workArea,
         MinSizeConflictLadderOptions options,
+        ImmutableArray<RedistributedPlacement>.Builder redistributions,
         ImmutableArray<BoundedOverlapPlacement>.Builder overlaps,
         ImmutableArray<AutoFloatDecision>.Builder autoFloats)
     {
         LayoutConstraints required = Required(id, defaultMinimum, effectiveMinSizes);
         if (required.MinWidth <= 0 && required.MinHeight <= 0)
         {
+            return;
+        }
+
+        Rect current = working[id];
+        double widthDeficit = required.MinWidth - current.Width;
+        double heightDeficit = required.MinHeight - current.Height;
+        if (widthDeficit <= Epsilon && heightDeficit <= Epsilon)
+        {
+            // Already satisfied by its current tile -- no conflict exists, so the tolerable-fraction
+            // test below (which is about whether the *requirement* is reasonable, not whether a
+            // deficit exists) must never run for this window at all.
             return;
         }
 
@@ -164,19 +182,8 @@ public static class MinSizeConflictLadder
             return;
         }
 
-        Rect current = working[id];
-        double widthDeficit = required.MinWidth - current.Width;
-        double heightDeficit = required.MinHeight - current.Height;
-
-        if (widthDeficit > Epsilon)
-        {
-            TryRedistribute(working, id, SplitOrientation.Horizontal, widthDeficit, defaultMinimum, effectiveMinSizes);
-        }
-
-        if (heightDeficit > Epsilon)
-        {
-            TryRedistribute(working, id, SplitOrientation.Vertical, heightDeficit, defaultMinimum, effectiveMinSizes);
-        }
+        bool widthRedistributed = widthDeficit > Epsilon && TryRedistribute(working, id, SplitOrientation.Horizontal, widthDeficit, defaultMinimum, effectiveMinSizes);
+        bool heightRedistributed = heightDeficit > Epsilon && TryRedistribute(working, id, SplitOrientation.Vertical, heightDeficit, defaultMinimum, effectiveMinSizes);
 
         current = working[id];
         bool stillDeficient = required.MinWidth - current.Width > Epsilon || required.MinHeight - current.Height > Epsilon;
@@ -185,6 +192,10 @@ public static class MinSizeConflictLadder
             Rect inflated = InflateToMinimum(current, required, workArea);
             working[id] = inflated;
             overlaps.Add(new BoundedOverlapPlacement(id, inflated));
+        }
+        else if (widthRedistributed || heightRedistributed)
+        {
+            redistributions.Add(new RedistributedPlacement(id, current));
         }
     }
 
@@ -226,10 +237,11 @@ public static class MinSizeConflictLadder
     /// neighbor along <paramref name="axis"/> (<see cref="TryFindFullSpanNeighbor"/>) and, if
     /// shrinking it by <paramref name="deficit"/> would not push it below its own required minimum,
     /// move exactly that much space from the neighbor to <paramref name="id"/>. Mutates
-    /// <paramref name="working"/> in place on success; leaves it untouched on failure (falling
-    /// through to steps 2/3 is the caller's job).
+    /// <paramref name="working"/> in place and returns <see langword="true"/> on success; leaves it
+    /// untouched and returns <see langword="false"/> on failure (falling through to steps 2/3 is the
+    /// caller's job).
     /// </summary>
-    private static void TryRedistribute(
+    private static bool TryRedistribute(
         Dictionary<WindowId, Rect> working,
         WindowId id,
         SplitOrientation axis,
@@ -240,7 +252,7 @@ public static class MinSizeConflictLadder
         Rect current = working[id];
         if (!TryFindFullSpanNeighbor(working, id, current, axis, out WindowId neighborId, out bool neighborIsAfter))
         {
-            return;
+            return false;
         }
 
         Rect neighborRect = working[neighborId];
@@ -252,7 +264,7 @@ public static class MinSizeConflictLadder
         if (neighborSizeAfterShrink <= 0 || neighborSizeAfterShrink < neighborRequiredSize - Epsilon)
         {
             // The axis cannot absorb it -- steps 2/3 decide instead.
-            return;
+            return false;
         }
 
         if (neighborIsAfter)
@@ -265,6 +277,8 @@ public static class MinSizeConflictLadder
             working[id] = AdjustEdge(current, axis, isLeadingEdge: true, delta: -deficit);
             working[neighborId] = AdjustEdge(neighborRect, axis, isLeadingEdge: false, delta: -deficit);
         }
+
+        return true;
     }
 
     /// <summary>

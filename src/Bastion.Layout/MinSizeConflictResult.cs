@@ -39,12 +39,21 @@ public sealed record MinSizeConflictResult
     /// </summary>
     public required ImmutableArray<WindowPlacement> Placements { get; init; }
 
+    /// <summary>Windows step 1 (redistribute) fully satisfied by moving space from a single full-span neighbor -- see <see cref="RedistributedPlacement"/>.</summary>
+    public ImmutableArray<RedistributedPlacement> Redistributions { get; init; } = ImmutableArray<RedistributedPlacement>.Empty;
+
     /// <summary>Windows step 2 (bounded overlap) grew beyond what their neighbors could absorb -- see <see cref="BoundedOverlapPlacement"/>.</summary>
     public ImmutableArray<BoundedOverlapPlacement> Overlaps { get; init; } = ImmutableArray<BoundedOverlapPlacement>.Empty;
 
     /// <summary>Windows step 3 excluded from tiling entirely -- see <see cref="AutoFloatDecision"/>.</summary>
     public ImmutableArray<AutoFloatDecision> AutoFloats { get; init; } = ImmutableArray<AutoFloatDecision>.Empty;
 
-    /// <summary>Whether any window in this result needed any ladder step beyond "already satisfied."</summary>
-    public bool HasAnyConflict => !Overlaps.IsEmpty || !AutoFloats.IsEmpty;
+    /// <summary>
+    /// Whether any window in this result needed any ladder step beyond "already satisfied" --
+    /// including a successful step 1 redistribution (Codex review finding on this PR: this must
+    /// account for <see cref="Redistributions"/> too, not just <see cref="Overlaps"/>/
+    /// <see cref="AutoFloats"/>, since redistribution alone still moves multiple windows' bounds
+    /// away from what the solver originally produced).
+    /// </summary>
+    public bool HasAnyConflict => !Redistributions.IsEmpty || !Overlaps.IsEmpty || !AutoFloats.IsEmpty;
 }
