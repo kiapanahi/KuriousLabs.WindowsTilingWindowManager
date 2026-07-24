@@ -1,4 +1,5 @@
 using Bastion.Win32;
+using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
 namespace Bastion.Win32.Tests;
@@ -18,7 +19,7 @@ public sealed class WinEventPumpServiceTests
     public void ConstructorWiresIngestReaderToAFreshEmptyChannel()
     {
         var reconcileSignal = new FakeReconcileNowSignal();
-        using var pump = new WinEventPumpService(reconcileSignal);
+        using var pump = new WinEventPumpService(reconcileSignal, NullLogger<WinEventPumpService>.Instance);
 
         Assert.NotNull(pump.IngestReader);
         Assert.False(pump.IngestReader.TryRead(out _));
@@ -28,7 +29,7 @@ public sealed class WinEventPumpServiceTests
     public async Task StartAsyncWithAnAlreadyCanceledTokenThrowsAndLeavesNoPumpThreadAlive()
     {
         var reconcileSignal = new FakeReconcileNowSignal();
-        using var pump = new WinEventPumpService(reconcileSignal);
+        using var pump = new WinEventPumpService(reconcileSignal, NullLogger<WinEventPumpService>.Instance);
         var alreadyCanceled = new CancellationToken(canceled: true);
 
         // ManualResetEventSlim.Wait(CancellationToken) is documented to throw OperationCanceledException

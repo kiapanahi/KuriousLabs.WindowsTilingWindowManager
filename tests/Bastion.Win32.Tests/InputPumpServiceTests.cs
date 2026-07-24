@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging.Abstractions;
 using Windows.Win32.Foundation;
 using Xunit;
 
@@ -20,7 +21,7 @@ public sealed class InputPumpServiceTests
     public void ConstructorDoesNotRegisterAnythingBeforeStartAsync()
     {
         var registrationSystem = new FakeHotkeyRegistrationSystem();
-        using var pump = new InputPumpService(registrationSystem, new FakeHotkeyDispatchTarget());
+        using var pump = new InputPumpService(registrationSystem, new FakeHotkeyDispatchTarget(), NullLogger<InputPumpService>.Instance);
 
         Assert.Empty(pump.RegistrationResults);
         Assert.Empty(registrationSystem.RegisteredIds);
@@ -32,7 +33,7 @@ public sealed class InputPumpServiceTests
         var registrationSystem = new FakeHotkeyRegistrationSystem();
         HotkeyBinding conflicting = DefaultHotkeyBindings.All[0];
         registrationSystem.SetConflict(conflicting.Id, WIN32_ERROR.ERROR_INVALID_PARAMETER);
-        using var pump = new InputPumpService(registrationSystem, new FakeHotkeyDispatchTarget());
+        using var pump = new InputPumpService(registrationSystem, new FakeHotkeyDispatchTarget(), NullLogger<InputPumpService>.Instance);
 
         await pump.StartAsync(CancellationToken.None);
         try
@@ -63,7 +64,7 @@ public sealed class InputPumpServiceTests
     [Fact]
     public async Task StartAsyncWithAnAlreadyCanceledTokenThrowsAndLeavesNoPumpThreadAlive()
     {
-        using var pump = new InputPumpService(new FakeHotkeyRegistrationSystem(), new FakeHotkeyDispatchTarget());
+        using var pump = new InputPumpService(new FakeHotkeyRegistrationSystem(), new FakeHotkeyDispatchTarget(), NullLogger<InputPumpService>.Instance);
         var alreadyCanceled = new CancellationToken(canceled: true);
 
         // ManualResetEventSlim.Wait(CancellationToken) is documented to throw OperationCanceledException

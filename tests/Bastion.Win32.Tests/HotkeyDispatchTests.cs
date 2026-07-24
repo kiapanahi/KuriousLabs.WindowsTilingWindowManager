@@ -1,4 +1,7 @@
 using System.Collections.Immutable;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Logging.Testing;
 using Windows.Win32.UI.Input.KeyboardAndMouse;
 using Xunit;
 
@@ -57,24 +60,29 @@ public sealed class HotkeyDispatchTests
     {
         var target = new FakeHotkeyDispatchTarget();
 
-        HotkeyDispatch.InvokeSafely(target, HotkeyCommand.FocusLeft);
+        HotkeyDispatch.InvokeSafely(NullLogger.Instance, target, HotkeyCommand.FocusLeft);
 
         Assert.Equal([HotkeyCommand.FocusLeft], target.InvokedCommands);
     }
 
     [Fact]
-    public void InvokeSafelyContainsAnExceptionThrownByTheDispatchTarget()
+    public void InvokeSafelyContainsAnExceptionThrownByTheDispatchTargetAndLogsTheFault()
     {
         // Codex PR review finding on this issue: an exception from a future Reconciler-driven
         // command implementation must never escape InputPumpService's raw dedicated pump thread —
         // docs/engineering/daemon-architecture.md §6's must-not-die policy — so InvokeSafely must
         // swallow it (after logging) rather than let it propagate to this test as an exception.
         var target = new FakeHotkeyDispatchTarget { ExceptionToThrow = new InvalidOperationException("boom") };
+        var logger = new FakeLogger();
 
-        HotkeyDispatch.InvokeSafely(target, HotkeyCommand.FocusLeft);
+        HotkeyDispatch.InvokeSafely(logger, target, HotkeyCommand.FocusLeft);
 
-        // No assertion beyond "this line was reached without HotkeyDispatch.InvokeSafely rethrowing"
-        // is needed — if containment regresses, the exception above propagates out of this test
-        // method and xUnit reports it as a failure.
+        // Reaching this line at all is the primary assertion — if containment regresses, the
+        // exception above propagates out of this test method and xUnit reports it as a failure.
+        // GitHub issue #14 additionally requires the fault to be observable through the real
+        // [LoggerMessage] pipeline rather than silently swallowed with no trace.
+        FakeLogRecord record = Assert.Single(logger.Collector.GetSnapshot());
+        Assert.Equal(LogLevel.Error, record.Level);
+        Assert.IsType<InvalidOperationException>(record.Exception);
     }
 }

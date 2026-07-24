@@ -1,5 +1,6 @@
 using System.Reflection;
 using Bastion.Daemon;
+using Bastion.Win32;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -55,6 +56,17 @@ builder.Services.AddBastionMonitorTopologyStub();
 // service. This is the slot issue #12 fills.
 
 using IHost host = builder.Build();
+
+// GitHub issue #14: HookDiagnostics.LogCallbackFault is called from inside [UnmanagedCallersOnly]
+// hook callbacks (WinEventPumpService, WindowProbe, ApplicationFrameUwpAttributionProvider), where
+// resolving anything from the DI container is unsafe/unavailable -- see that method's own remarks.
+// Hand it a real ILogger exactly once, here, via a static one-time handoff rather than DI
+// resolution inside the callback itself. Must run before host.RunAsync() starts the WinEvent pump
+// -- a hook could fire the moment that hosted service's StartAsync returns.
+// HookDiagnostics is a static class, so ILogger<HookDiagnostics> (a generic type argument) is not
+// legal C# (CS0718) -- ILoggerFactory.CreateLogger(Type) is the documented non-generic equivalent,
+// deriving the identical "Bastion.Win32.HookDiagnostics" category from the given Type value instead.
+HookDiagnostics.Initialize(host.Services.GetRequiredService<ILoggerFactory>().CreateLogger(typeof(HookDiagnostics)));
 
 // GitHub issue #48/PR #49: log the MinVer-derived running version once the host (and therefore
 // real ILogger-based logging) is up, ahead of every hosted service's own startup messages -- the

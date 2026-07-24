@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using Microsoft.Extensions.Logging;
 
 namespace Bastion.Win32;
 
@@ -25,6 +26,7 @@ internal static class HotkeyRegistrar
     /// takes for its own six hook ranges.
     /// </summary>
     public static ImmutableArray<HotkeyRegistrationResult> RegisterAll(
+        ILogger logger,
         IHotkeyRegistrationSystem system,
         ImmutableArray<HotkeyBinding> bindings)
     {
@@ -34,7 +36,7 @@ internal static class HotkeyRegistrar
             HotkeyCallResult callResult = system.Register(binding.Id, binding.Modifiers, (uint)binding.VirtualKey);
             if (!callResult.Success)
             {
-                HookDiagnostics.LogHotkeyRegistrationConflict(binding.Id, binding.Modifiers, (uint)binding.VirtualKey, callResult.ErrorCode);
+                logger.LogHotkeyRegistrationConflict(binding.Id, binding.Modifiers, (uint)binding.VirtualKey, callResult.ErrorCode);
             }
 
             results.Add(new HotkeyRegistrationResult(binding, callResult.Success, callResult.ErrorCode));
@@ -49,13 +51,13 @@ internal static class HotkeyRegistrar
     /// <c>UnregisterHotKey</c> to free — attempting it anyway would just be a second, redundant
     /// documented failure.
     /// </summary>
-    public static void UnregisterAll(IHotkeyRegistrationSystem system, ImmutableArray<HotkeyRegistrationResult> results)
+    public static void UnregisterAll(ILogger logger, IHotkeyRegistrationSystem system, ImmutableArray<HotkeyRegistrationResult> results)
     {
         foreach (HotkeyRegistrationResult result in results)
         {
             if (result.Registered && !system.Unregister(result.Binding.Id))
             {
-                HookDiagnostics.LogUnregisterHotkeyFailed(result.Binding.Id);
+                logger.LogUnregisterHotkeyFailed(result.Binding.Id);
             }
         }
     }

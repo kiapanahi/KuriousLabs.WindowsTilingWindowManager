@@ -95,6 +95,16 @@
     <PackageVersion Include="FsCheck.Xunit.v3" Version="3.3.3" />
     <PackageVersion Include="Microsoft.Testing.Extensions.CodeCoverage" Version="18.9.0" />
     <PackageVersion Include="Microsoft.Extensions.TimeProvider.Testing" Version="10.8.0" />
+
+    <!--
+      GitHub issue #14: FakeLogger(T)/FakeLogCollector, the official, AOT-safe ILogger test double
+      (learn.microsoft.com/dotnet/api/microsoft.extensions.logging.testing.fakelogger-1), the
+      logging-side analog of Microsoft.Extensions.TimeProvider.Testing's FakeTimeProvider just above.
+      Pinned to the same 10.8.0 build: both packages ship out of the dotnet/extensions repo on a
+      shared release cadence independent of the core runtime's 10.0.x versioning.
+    -->
+    <PackageVersion Include="Microsoft.Extensions.Diagnostics.Testing" Version="10.8.0" />
+
     <PackageVersion Include="Verify.XunitV3" Version="31.25.0" />
     <PackageVersion Include="coverlet.MTP" Version="10.0.1" />
 

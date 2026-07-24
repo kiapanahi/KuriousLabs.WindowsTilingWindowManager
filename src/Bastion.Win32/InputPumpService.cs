@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using System.Diagnostics.CodeAnalysis;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Windows.Win32;
 using Windows.Win32.Foundation;
 using Windows.Win32.UI.WindowsAndMessaging;
@@ -65,6 +66,7 @@ internal sealed class InputPumpService : IHostedService, IDisposable
 {
     private readonly IHotkeyRegistrationSystem _registrationSystem;
     private readonly IHotkeyDispatchTarget _dispatchTarget;
+    private readonly ILogger<InputPumpService> _logger;
     private readonly ManualResetEventSlim _threadReady = new(initialState: false);
     private Thread? _pumpThread;
     private volatile bool _stopRequested;
@@ -77,10 +79,11 @@ internal sealed class InputPumpService : IHostedService, IDisposable
     // until PumpLoop's Set() call, and that call happens strictly after this field's assignment.
     private ImmutableArray<HotkeyRegistrationResult> _registrationResults = ImmutableArray<HotkeyRegistrationResult>.Empty;
 
-    public InputPumpService(IHotkeyRegistrationSystem registrationSystem, IHotkeyDispatchTarget dispatchTarget)
+    public InputPumpService(IHotkeyRegistrationSystem registrationSystem, IHotkeyDispatchTarget dispatchTarget, ILogger<InputPumpService> logger)
     {
         _registrationSystem = registrationSystem;
         _dispatchTarget = dispatchTarget;
+        _logger = logger;
     }
 
     /// <summary>
@@ -144,7 +147,7 @@ internal sealed class InputPumpService : IHostedService, IDisposable
                 // Not immediately fatal — the bounded Join below still turns a pump that misses
                 // WM_QUIT into an observable TimeoutException rather than a silent hang — but a
                 // genuine occurrence of this documented failure should be visible, not discarded.
-                HookDiagnostics.LogPostQuitMessageFailed(_pumpThreadId, "Input pump");
+                _logger.LogPostQuitMessageFailed(_pumpThreadId, "Input pump");
             }
         }
 
@@ -165,7 +168,7 @@ internal sealed class InputPumpService : IHostedService, IDisposable
             // DESIGN.md §7: register the default table and probe every registration before this
             // thread is considered ready — a failed registration is surfaced (HotkeyRegistrar logs
             // it) but never stops the remaining bindings from being attempted.
-            _registrationResults = HotkeyRegistrar.RegisterAll(_registrationSystem, DefaultHotkeyBindings.All);
+            _registrationResults = HotkeyRegistrar.RegisterAll(_logger, _registrationSystem, DefaultHotkeyBindings.All);
             ForceMessageQueueCreation();
 
             // StartAsync's _threadReady.Wait(...) unblocks here — registration has been probed and
@@ -180,7 +183,7 @@ internal sealed class InputPumpService : IHostedService, IDisposable
             // fact ("Frees a hot key previously registered by the calling thread") — which is why
             // this happens here, inside PumpLoop, rather than from StopAsync's caller thread. Matches
             // WinEventPumpService's identical same-thread requirement for UnhookWinEvent.
-            HotkeyRegistrar.UnregisterAll(_registrationSystem, _registrationResults);
+            HotkeyRegistrar.UnregisterAll(_logger, _registrationSystem, _registrationResults);
 
             // Safety net: if RegisterAll/something before the Set() call above ever threw
             // unexpectedly, this keeps StartAsync's Wait from hanging forever. A no-op on the
@@ -222,7 +225,7 @@ internal sealed class InputPumpService : IHostedService, IDisposable
                     // Unexpected: this pump always passes a null hWnd filter, so the documented
                     // invalid-window-handle trigger for -1 should not occur in practice — exit rather
                     // than spin forever on a persistent error, per GetMessage's own docs.
-                    HookDiagnostics.LogMessageLoopFault("Input pump");
+                    _logger.LogMessageLoopFault("Input pump");
                     return;
                 default:
                     if (message.message == PInvoke.WM_HOTKEY)
@@ -256,7 +259,7 @@ internal sealed class InputPumpService : IHostedService, IDisposable
             // Never call _dispatchTarget.OnHotkeyInvoked directly here — HotkeyDispatch.InvokeSafely
             // is the mandatory crash-containment boundary; see its own remarks for why an escaping
             // exception on this raw dedicated thread would otherwise kill the whole daemon process.
-            HotkeyDispatch.InvokeSafely(_dispatchTarget, command);
+            HotkeyDispatch.InvokeSafely(_logger, _dispatchTarget, command);
         }
     }
 }

@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using System.Diagnostics.CodeAnalysis;
+using Microsoft.Extensions.Logging;
 
 namespace Bastion.Win32;
 
@@ -71,7 +72,7 @@ internal static class HotkeyDispatch
             "not a native callback: see this method's own remarks and " +
             "docs/engineering/daemon-architecture.md §6. Matches WinEventPumpService.OnWinEvent's " +
             "own mandatory catch-all rationale.")]
-    public static void InvokeSafely(IHotkeyDispatchTarget dispatchTarget, HotkeyCommand command)
+    public static void InvokeSafely(ILogger logger, IHotkeyDispatchTarget dispatchTarget, HotkeyCommand command)
     {
         try
         {
@@ -79,7 +80,7 @@ internal static class HotkeyDispatch
         }
         catch (Exception ex)
         {
-            HookDiagnostics.LogHotkeyDispatchFault(command, ex);
+            logger.LogHotkeyDispatchFault(command, ex);
         }
     }
 }
