@@ -1,3 +1,6 @@
+using Windows.Win32.Foundation;
+using Windows.Win32.UI.Input.KeyboardAndMouse;
+
 namespace Bastion.Win32;
 
 /// <summary>
@@ -27,30 +30,33 @@ internal static class HookDiagnostics
             "that range will not be monitored.");
 
     /// <summary>
-    /// Logs an unexpected <c>GetMessage</c> failure (a -1 return) on the WinEvent pump thread's
-    /// message loop. <c>GetMessage</c>'s own docs warn against the naive 0/nonzero check for
-    /// exactly this reason; this pump implements the correct 3-way check but always passes a null
-    /// <c>hWnd</c> filter, so the documented invalid-window-handle trigger for -1 should not occur
-    /// in practice — this sink exists so a genuine occurrence is observable rather than silent.
+    /// Logs an unexpected <c>GetMessage</c> failure (a -1 return) on <paramref name="pumpName"/>'s
+    /// message loop — shared by every <c>GetMessage</c>/<c>DispatchMessage</c>-loop pump in this
+    /// assembly (<see cref="WinEventPumpService"/>, <see cref="InputPumpService"/>), never
+    /// hardcoded to one. <c>GetMessage</c>'s own docs warn against the naive 0/nonzero check for
+    /// exactly this reason; every one of these pumps implements the correct 3-way check but always
+    /// passes a null <c>hWnd</c> filter, so the documented invalid-window-handle trigger for -1
+    /// should not occur in practice — this sink exists so a genuine occurrence is observable rather
+    /// than silent.
     /// </summary>
-    public static void LogMessageLoopFault() =>
-        Console.Error.WriteLine(
-            "[Bastion.Win32] WinEvent pump's GetMessage loop returned -1 (error); exiting the pump loop.");
+    public static void LogMessageLoopFault(string pumpName) =>
+        Console.Error.WriteLine($"[Bastion.Win32] {pumpName}'s GetMessage loop returned -1 (error); exiting the pump loop.");
 
     /// <summary>
-    /// Logs a failed <c>PostThreadMessage(WM_QUIT)</c> call from <c>StopAsync</c> — per its own
-    /// documented failure modes, the pump thread's message queue may not exist yet, the thread id
-    /// may already be stale, a UIPI integrity-level check may have blocked it, or the per-queue
-    /// message quota may have been hit. Not immediately fatal on its own: <c>StopAsync</c>'s
-    /// bounded <c>Thread.Join</c> still turns a pump that never receives <c>WM_QUIT</c> into an
-    /// observable <see cref="TimeoutException"/> rather than a silent hang, but a genuine
-    /// occurrence of this specific failure should be visible rather than discarded (the call site
-    /// previously ignored this return value outright).
+    /// Logs a failed <c>PostThreadMessage(WM_QUIT)</c> call from <paramref name="pumpName"/>'s
+    /// <c>StopAsync</c> — shared by every pump-thread <c>IHostedService</c> in this assembly, never
+    /// hardcoded to one. Per <c>PostThreadMessage</c>'s own documented failure modes, the pump
+    /// thread's message queue may not exist yet, the thread id may already be stale, a UIPI
+    /// integrity-level check may have blocked it, or the per-queue message quota may have been hit.
+    /// Not immediately fatal on its own: <c>StopAsync</c>'s bounded <c>Thread.Join</c> still turns a
+    /// pump that never receives <c>WM_QUIT</c> into an observable <see cref="TimeoutException"/>
+    /// rather than a silent hang, but a genuine occurrence of this specific failure should be
+    /// visible rather than discarded.
     /// </summary>
-    public static void LogPostQuitMessageFailed(uint threadId) =>
+    public static void LogPostQuitMessageFailed(uint threadId, string pumpName) =>
         Console.Error.WriteLine(
-            $"[Bastion.Win32] PostThreadMessage(WM_QUIT) to thread {threadId} failed; the WinEvent " +
-            "pump may not exit until StopAsync's join timeout.");
+            $"[Bastion.Win32] PostThreadMessage(WM_QUIT) to thread {threadId} failed; the {pumpName} " +
+            "may not exit until StopAsync's join timeout.");
 
     /// <summary>
     /// Logs a hook that failed to unregister via <c>UnhookWinEvent</c>. Per
@@ -76,4 +82,46 @@ internal static class HookDiagnostics
         Console.Error.WriteLine(
             "[Bastion.Win32] at least one WinEvent hook failed to unregister; intentionally " +
             "leaking its shared callback context rather than risking a use-after-free.");
+
+    /// <summary>
+    /// Logs a hotkey registration that failed (a bare zero <c>BOOL</c> return from
+    /// <c>RegisterHotKey</c>). Per DESIGN.md §7's honesty note, this is treated as a conflict
+    /// unconditionally — never gated on <c>GetLastError</c> returning specifically
+    /// <c>ERROR_HOTKEY_ALREADY_REGISTERED</c>, since that code is observed behavior for this API,
+    /// not a contractual guarantee. <paramref name="errorCode"/> is logged for diagnostics only,
+    /// never branched on to decide whether the failure "counts" as a conflict.
+    /// </summary>
+    public static void LogHotkeyRegistrationConflict(int id, HOT_KEY_MODIFIERS modifiers, uint virtualKeyCode, WIN32_ERROR? errorCode) =>
+        Console.Error.WriteLine(
+            $"[Bastion.Win32] RegisterHotKey failed for id {id} (modifiers=0x{(uint)modifiers:X}, " +
+            $"vk=0x{virtualKeyCode:X}); treating as a conflict regardless of the specific error " +
+            $"(GetLastError observed: {errorCode?.ToString() ?? "none"}).");
+
+    /// <summary>
+    /// Logs a hotkey that failed to unregister via <c>UnregisterHotKey</c> during shutdown. Not
+    /// immediately fatal on its own — the pump thread is exiting regardless — but a genuine
+    /// occurrence should be visible rather than silently discarded, matching
+    /// <see cref="LogUnhookWinEventFailed"/>'s own rationale for the WinEvent pump's equivalent
+    /// shutdown-time failure.
+    /// </summary>
+    public static void LogUnregisterHotkeyFailed(int id) =>
+        Console.Error.WriteLine($"[Bastion.Win32] UnregisterHotKey failed for id {id} during shutdown.");
+
+    /// <summary>
+    /// Logs a dispatched <see cref="HotkeyCommand"/> — the pre-composition-root stand-in for
+    /// actually invoking a Reconciler-driven layout command (GitHub issue #10). See
+    /// <see cref="LoggingHotkeyDispatchTarget"/>.
+    /// </summary>
+    public static void LogHotkeyInvoked(HotkeyCommand command) =>
+        Console.Error.WriteLine($"[Bastion.Win32] hotkey invoked: {command}.");
+
+    /// <summary>
+    /// Logs an exception thrown by an <see cref="IHotkeyDispatchTarget"/> while handling
+    /// <paramref name="command"/>. Contained here rather than left to propagate — see
+    /// <see cref="HotkeyDispatch.InvokeSafely"/>'s remarks for why an unhandled exception on the
+    /// input pump's raw dedicated thread would otherwise terminate the whole <c>bastiond</c>
+    /// process.
+    /// </summary>
+    public static void LogHotkeyDispatchFault(HotkeyCommand command, Exception exception) =>
+        Console.Error.WriteLine($"[Bastion.Win32] hotkey dispatch fault for command {command}: {exception}");
 }

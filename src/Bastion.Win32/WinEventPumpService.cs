@@ -159,7 +159,7 @@ internal sealed class WinEventPumpService : IHostedService, IDisposable
                 // Not immediately fatal — the bounded Join below still turns a pump that misses
                 // WM_QUIT into an observable TimeoutException rather than a silent hang — but a
                 // genuine occurrence of this documented failure should be visible, not discarded.
-                HookDiagnostics.LogPostQuitMessageFailed(_pumpThreadId);
+                HookDiagnostics.LogPostQuitMessageFailed(_pumpThreadId, "WinEvent pump");
             }
         }
 
@@ -298,7 +298,7 @@ internal sealed class WinEventPumpService : IHostedService, IDisposable
                     // Unexpected: this pump always passes a null hWnd filter, so the documented
                     // invalid-window-handle trigger for -1 should not occur in practice — exit
                     // rather than spin forever on a persistent error, per GetMessage's own docs.
-                    HookDiagnostics.LogMessageLoopFault();
+                    HookDiagnostics.LogMessageLoopFault("WinEvent pump");
                     return;
                 default:
                     _ = PInvoke.TranslateMessage(message);
