@@ -23,6 +23,74 @@ public sealed class PlacementExecutorTests
 {
     private static readonly Rect s_target = new(0, 0, 800, 600);
 
+    // --- Construction & validation (Copilot review finding on this PR) --------------------------
+
+    [Fact]
+    public void ConstructorRejectsANullPlacementSystem()
+    {
+        Assert.Throws<ArgumentNullException>(() => new PlacementExecutor(null!, new FakeReconcileNowSignal(), new FakeTimeProvider()));
+    }
+
+    [Fact]
+    public void ConstructorRejectsANullReconcileNowSignal()
+    {
+        Assert.Throws<ArgumentNullException>(() => new PlacementExecutor(new FakePlacementSystem(), null!, new FakeTimeProvider()));
+    }
+
+    [Fact]
+    public void ConstructorRejectsANullTimeProvider()
+    {
+        Assert.Throws<ArgumentNullException>(() => new PlacementExecutor(new FakePlacementSystem(), new FakeReconcileNowSignal(), null!));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void ConstructorRejectsANonPositiveHangProbeTimeout(double milliseconds)
+    {
+        var options = new PlacementExecutorOptions { HangProbeTimeout = TimeSpan.FromMilliseconds(milliseconds) };
+        Assert.Throws<ArgumentOutOfRangeException>(() => CreateExecutor(new FakePlacementSystem(), options: options));
+    }
+
+    [Fact]
+    public void ConstructorRejectsANonPositiveInitialQuarantineBackoff()
+    {
+        var options = new PlacementExecutorOptions { InitialQuarantineBackoff = TimeSpan.Zero };
+        Assert.Throws<ArgumentOutOfRangeException>(() => CreateExecutor(new FakePlacementSystem(), options: options));
+    }
+
+    [Fact]
+    public void ConstructorRejectsAMaxQuarantineBackoffSmallerThanTheInitialOne()
+    {
+        var options = new PlacementExecutorOptions
+        {
+            InitialQuarantineBackoff = TimeSpan.FromSeconds(10),
+            MaxQuarantineBackoff = TimeSpan.FromSeconds(1),
+        };
+        Assert.Throws<ArgumentOutOfRangeException>(() => CreateExecutor(new FakePlacementSystem(), options: options));
+    }
+
+    [Fact]
+    public void ConstructorRejectsAQuarantineBackoffMultiplierBelowOne()
+    {
+        var options = new PlacementExecutorOptions { QuarantineBackoffMultiplier = 0.5 };
+        Assert.Throws<ArgumentOutOfRangeException>(() => CreateExecutor(new FakePlacementSystem(), options: options));
+    }
+
+    [Fact]
+    public void ConstructorRejectsANegativeSizeTolerance()
+    {
+        var options = new PlacementExecutorOptions { SizeToleranceDevicePixels = -1 };
+        Assert.Throws<ArgumentOutOfRangeException>(() => CreateExecutor(new FakePlacementSystem(), options: options));
+    }
+
+    [Fact]
+    public void ConstructorRejectsANegativeAsyncVerifyDelay()
+    {
+        var options = new PlacementExecutorOptions { AsyncVerifyDelay = TimeSpan.FromMilliseconds(-1) };
+        Assert.Throws<ArgumentOutOfRangeException>(() => CreateExecutor(new FakePlacementSystem(), options: options));
+    }
+
     // --- Untile / vanished-window handling ------------------------------------------------------
 
     [Fact]
@@ -184,7 +252,11 @@ public sealed class PlacementExecutorTests
         var windowId = WindowId.FromOpaqueValue(1);
         system.SetHwnd(windowId, hwnd);
         system.SetHung(hwnd);
-        var options = new PlacementExecutorOptions { InitialQuarantineBackoff = TimeSpan.FromMinutes(10) };
+        var options = new PlacementExecutorOptions
+        {
+            InitialQuarantineBackoff = TimeSpan.FromMinutes(10),
+            MaxQuarantineBackoff = TimeSpan.FromMinutes(10),
+        };
         PlacementExecutor executor = CreateExecutor(system, timeProvider: time, options: options);
         ImmutableArray<PlacementInstruction> plan = [PlacementInstruction.Move(windowId, s_target)];
 
@@ -292,27 +364,25 @@ public sealed class PlacementExecutorTests
     [Fact]
     public async Task GCLatencyModeIsRestoredAfterTheDeferBatchEvenOnFailure()
     {
-        GCLatencyMode original = GCSettings.LatencyMode;
-        try
-        {
-            GCSettings.LatencyMode = GCLatencyMode.Interactive;
-            var time = new FakeTimeProvider();
-            var system = new FakePlacementSystem { EndDeferFails = true };
-            HWND hwnd = new(1);
-            var windowId = WindowId.FromOpaqueValue(1);
-            system.SetHwnd(windowId, hwnd);
-            system.SetGeometry(hwnd, s_target, s_target);
-            PlacementExecutor executor = CreateExecutor(system, timeProvider: time);
+        // GCSettings.LatencyMode is process-wide, and this repo does not disable xUnit
+        // parallelization -- setting it to a specific value here (even restored in a finally)
+        // could still race with other concurrently running tests reading or writing it in between
+        // (Copilot review finding on this PR). Capturing (never writing) the ambient value and
+        // asserting it is unchanged afterward is an equally strong regression test for "restored in
+        // a finally," without this test ever mutating shared global state itself.
+        GCLatencyMode ambient = GCSettings.LatencyMode;
+        var time = new FakeTimeProvider();
+        var system = new FakePlacementSystem { EndDeferFails = true };
+        HWND hwnd = new(1);
+        var windowId = WindowId.FromOpaqueValue(1);
+        system.SetHwnd(windowId, hwnd);
+        system.SetGeometry(hwnd, s_target, s_target);
+        PlacementExecutor executor = CreateExecutor(system, timeProvider: time);
 
-            ImmutableArray<PlacementInstruction> plan = [PlacementInstruction.Move(windowId, s_target)];
-            await ApplyAndSettleAsync(executor, plan, time);
+        ImmutableArray<PlacementInstruction> plan = [PlacementInstruction.Move(windowId, s_target)];
+        await ApplyAndSettleAsync(executor, plan, time);
 
-            Assert.Equal(GCLatencyMode.Interactive, GCSettings.LatencyMode);
-        }
-        finally
-        {
-            GCSettings.LatencyMode = original;
-        }
+        Assert.Equal(ambient, GCSettings.LatencyMode);
     }
 
     // --- Async-settle wait for WPF_ASYNCWINDOWPLACEMENT/SWP_ASYNCWINDOWPOS (Codex finding) -------

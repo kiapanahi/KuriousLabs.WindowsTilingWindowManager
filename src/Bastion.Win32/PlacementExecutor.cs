@@ -85,6 +85,13 @@ namespace Bastion.Win32;
 /// verifications) happens to finish in — a plan mixing <c>Untile</c> and <c>Move</c> instructions
 /// would otherwise come back reordered (Codex review finding on this PR).
 /// </para>
+/// <para>
+/// <b>Options are validated at construction, matching <c>Reconciler</c>'s own pattern.</b> A
+/// non-positive <see cref="PlacementExecutorOptions.HangProbeTimeout"/> would otherwise flow into
+/// <c>SendMessageTimeout</c> as <c>(uint)timeout.TotalMilliseconds</c>, wrapping a negative value
+/// into a huge one and stalling every call this executor makes (Copilot review finding on this PR);
+/// every other timing/threshold value is checked for the same reason.
+/// </para>
 /// </remarks>
 [SuppressMessage(
     "Performance",
@@ -93,14 +100,66 @@ namespace Bastion.Win32;
         "registered once Bastion.Daemon's composition root is wired (GitHub issue #10) — not yet " +
         "wired as of this change. Same documented CA1812 false-positive shape as " +
         "Coalescer/WindowSystemAdapter/WinEventPumpService/ReconcilerIntentPump/BastiondService.")]
-internal sealed class PlacementExecutor(
-    IPlacementSystem system,
-    IReconcileNowSignal reconcileNowSignal,
-    TimeProvider timeProvider,
-    PlacementExecutorOptions? options = null)
+internal sealed class PlacementExecutor
 {
-    private readonly PlacementExecutorOptions _options = options ?? PlacementExecutorOptions.Default;
+    private readonly IPlacementSystem _system;
+    private readonly IReconcileNowSignal _reconcileNowSignal;
+    private readonly TimeProvider _timeProvider;
+    private readonly PlacementExecutorOptions _options;
     private readonly Dictionary<WindowId, QuarantineState> _quarantine = [];
+
+    public PlacementExecutor(
+        IPlacementSystem system,
+        IReconcileNowSignal reconcileNowSignal,
+        TimeProvider timeProvider,
+        PlacementExecutorOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(system);
+        ArgumentNullException.ThrowIfNull(reconcileNowSignal);
+        ArgumentNullException.ThrowIfNull(timeProvider);
+
+        PlacementExecutorOptions resolvedOptions = options ?? PlacementExecutorOptions.Default;
+
+        // Manual checks, not the ArgumentOutOfRangeException.ThrowIfX(value, ...) helpers: those
+        // derive paramName from the value expression via CallerArgumentExpression, and every value
+        // here is a member access on the local `resolvedOptions` rather than a parameter of this
+        // constructor -- the same MA0015 mismatch Reconciler's own constructor already documents.
+        // nameof(options) is the actual source of every value below, even after defaulting.
+        if (resolvedOptions.HangProbeTimeout <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), resolvedOptions.HangProbeTimeout, "PlacementExecutorOptions.HangProbeTimeout must be positive.");
+        }
+
+        if (resolvedOptions.InitialQuarantineBackoff <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), resolvedOptions.InitialQuarantineBackoff, "PlacementExecutorOptions.InitialQuarantineBackoff must be positive.");
+        }
+
+        if (resolvedOptions.MaxQuarantineBackoff < resolvedOptions.InitialQuarantineBackoff)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), resolvedOptions.MaxQuarantineBackoff, "PlacementExecutorOptions.MaxQuarantineBackoff must be at least InitialQuarantineBackoff.");
+        }
+
+        if (resolvedOptions.QuarantineBackoffMultiplier < 1.0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), resolvedOptions.QuarantineBackoffMultiplier, "PlacementExecutorOptions.QuarantineBackoffMultiplier must be at least 1.0.");
+        }
+
+        if (resolvedOptions.SizeToleranceDevicePixels < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), resolvedOptions.SizeToleranceDevicePixels, "PlacementExecutorOptions.SizeToleranceDevicePixels must be non-negative.");
+        }
+
+        if (resolvedOptions.AsyncVerifyDelay < TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), resolvedOptions.AsyncVerifyDelay, "PlacementExecutorOptions.AsyncVerifyDelay must be non-negative.");
+        }
+
+        _system = system;
+        _reconcileNowSignal = reconcileNowSignal;
+        _timeProvider = timeProvider;
+        _options = resolvedOptions;
+    }
 
     /// <summary>
     /// Applies every <see cref="PlacementInstruction"/> in <paramref name="plan"/>, one outcome per
@@ -114,7 +173,7 @@ internal sealed class PlacementExecutor(
             return ImmutableArray<PlacementOutcome>.Empty;
         }
 
-        var pass = new ApplyPass(system.ReadPrimaryWorkArea(), plan.Length);
+        var pass = new ApplyPass(_system.ReadPrimaryWorkArea(), plan.Length);
 
         for (int index = 0; index < plan.Length; index++)
         {
@@ -136,14 +195,14 @@ internal sealed class PlacementExecutor(
         {
             // See this type's remarks: one bounded, pass-wide wait for every window placed through
             // an async-flagged path this pass, never a per-window wait.
-            await Task.Delay(_options.AsyncVerifyDelay, timeProvider, cancellationToken).ConfigureAwait(false);
+            await Task.Delay(_options.AsyncVerifyDelay, _timeProvider, cancellationToken).ConfigureAwait(false);
         }
 
         FinalizeVerifications(pass);
 
         if (pass.AnyClamped)
         {
-            reconcileNowSignal.RequestReconcileNow();
+            _reconcileNowSignal.RequestReconcileNow();
         }
 
         return ImmutableArray.Create(pass.Outcomes);
@@ -163,7 +222,7 @@ internal sealed class PlacementExecutor(
             return;
         }
 
-        if (!system.TryResolveHwnd(instruction.WindowId, out HWND hwnd))
+        if (!_system.TryResolveHwnd(instruction.WindowId, out HWND hwnd))
         {
             // Vanished between the Reconciler's plan and this pass -- a routine race, not
             // exceptional; the next convergence pass naturally forgets it once EnumWindows stops
@@ -183,12 +242,12 @@ internal sealed class PlacementExecutor(
         // so every instruction reaching here carries a real target.
         Rect requestedTarget = instruction.TargetBounds!.Value;
         Rect correctedTarget = requestedTarget;
-        if (system.TryReadGeometry(hwnd, out Rect windowRect, out Rect frameBounds))
+        if (_system.TryReadGeometry(hwnd, out Rect windowRect, out Rect frameBounds))
         {
             correctedTarget = PlacementCoordinateConverter.ApplyBorderCorrection(requestedTarget, windowRect, frameBounds);
         }
 
-        WindowPlacementState state = system.ReadPlacementState(hwnd);
+        WindowPlacementState state = _system.ReadPlacementState(hwnd);
 
         if (state.NeedsStateNormalization)
         {
@@ -215,7 +274,7 @@ internal sealed class PlacementExecutor(
     /// </summary>
     private bool TryQuarantine(WindowId windowId, HWND hwnd, QuarantineState quarantine, int index, ApplyPass pass)
     {
-        DateTimeOffset now = timeProvider.GetUtcNow();
+        DateTimeOffset now = _timeProvider.GetUtcNow();
 
         if (quarantine.IsBackedOff(now))
         {
@@ -223,7 +282,7 @@ internal sealed class PlacementExecutor(
             return true;
         }
 
-        if (system.ProbeIsHung(hwnd, _options.HangProbeTimeout))
+        if (_system.ProbeIsHung(hwnd, _options.HangProbeTimeout))
         {
             quarantine.RecordHang(now, _options);
             pass.Outcomes[index] = PlacementOutcome.QuarantinedHung(windowId);
@@ -242,7 +301,7 @@ internal sealed class PlacementExecutor(
             ? correctedTarget
             : PlacementCoordinateConverter.ToWorkspaceCoordinates(correctedTarget, pass.PrimaryWorkArea);
 
-        PlacementCallResult result = system.ApplyWindowPlacement(hwnd, placementTarget);
+        PlacementCallResult result = _system.ApplyWindowPlacement(hwnd, placementTarget);
         if (!result.Success)
         {
             pass.Outcomes[index] = PlacementOutcome.Failed(windowId, result.ErrorCode);
@@ -258,7 +317,7 @@ internal sealed class PlacementExecutor(
     {
         foreach (BatchCandidate candidate in pass.PerWindowFallback)
         {
-            PlacementCallResult result = system.ApplyWindowPosFallback(candidate.Hwnd, candidate.CorrectedTarget);
+            PlacementCallResult result = _system.ApplyWindowPosFallback(candidate.Hwnd, candidate.CorrectedTarget);
             if (!result.Success)
             {
                 pass.Outcomes[candidate.Index] = PlacementOutcome.Failed(candidate.WindowId, result.ErrorCode);
@@ -335,7 +394,7 @@ internal sealed class PlacementExecutor(
 
     private bool TryDeferAndEndBatch(List<BatchCandidate> candidates)
     {
-        HDWP batch = system.BeginDefer(candidates.Count);
+        HDWP batch = _system.BeginDefer(candidates.Count);
         if (batch.IsNull)
         {
             return false;
@@ -343,7 +402,7 @@ internal sealed class PlacementExecutor(
 
         foreach (BatchCandidate candidate in candidates)
         {
-            if (system.TryDefer(batch, candidate.Hwnd, candidate.CorrectedTarget) is not { } next)
+            if (_system.TryDefer(batch, candidate.Hwnd, candidate.CorrectedTarget) is not { } next)
             {
                 // DeferWindowPos's own documented contract: abandon and never call
                 // EndDeferWindowPos on this HDWP.
@@ -353,7 +412,7 @@ internal sealed class PlacementExecutor(
             batch = next;
         }
 
-        return system.EndDefer(batch);
+        return _system.EndDefer(batch);
     }
 
     /// <summary>Verify-after-move (DESIGN.md §3.6e) for every window deferred behind the pass-wide async settle wait.</summary>
@@ -372,7 +431,7 @@ internal sealed class PlacementExecutor(
     /// </summary>
     private PlacementOutcome FinalizeVerifiedMove(WindowId windowId, HWND hwnd, Rect requestedTarget)
     {
-        if (!system.TryReadGeometry(hwnd, out _, out Rect verifiedBounds))
+        if (!_system.TryReadGeometry(hwnd, out _, out Rect verifiedBounds))
         {
             // Vanished between the move and this verify read -- a routine race, not exceptional
             // (matching WindowSystemAdapter's own established handling of the identical race). The
