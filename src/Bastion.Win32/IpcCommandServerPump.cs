@@ -184,6 +184,22 @@ internal sealed partial class IpcCommandServerPump(IpcCommandProcessor processor
         try
         {
             using var envelope = JsonDocument.Parse(requestBody);
+
+            // JsonDocument.Parse succeeds for any syntactically valid JSON text, including a
+            // non-object root (a bare `[]`, `null`, `42`, `"a string"`) -- JsonElement.TryGetProperty
+            // is documented to throw InvalidOperationException, not JsonException, whenever
+            // RootElement.ValueKind isn't JsonValueKind.Object
+            // (https://learn.microsoft.com/dotnet/api/system.text.json.jsonelement.trygetproperty#system-text-json-jsonelement-trygetproperty(system-string-system-text-json-jsonelement@)).
+            // Left unchecked, that exception would escape this method's own catch (JsonException)
+            // below, propagate out of ProcessRequest entirely, and land in ServiceConnectionAsync's
+            // `catch (Exception ex) when (ex is IOException or InvalidOperationException)` clause --
+            // meant for "the client disconnected mid-exchange" -- silently closing the connection
+            // instead of returning the documented ErrorReply a malformed request must get.
+            if (envelope.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                return new ErrorReply(IpcCommand.CurrentProtocolVersion, $"Malformed IPC request: expected a JSON object at the root, got {envelope.RootElement.ValueKind}.");
+            }
+
             if (!envelope.RootElement.TryGetProperty("protocolVersion", out JsonElement versionElement) ||
                 !versionElement.TryGetInt32(out receivedProtocolVersion))
             {

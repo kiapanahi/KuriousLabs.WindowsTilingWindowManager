@@ -1,4 +1,6 @@
 using System.IO.Pipes;
+using System.Text;
+using System.Text.Json;
 using Bastion.Core;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
@@ -90,6 +92,55 @@ public sealed class IpcCommandServerPumpTests
         finally
         {
             await pump.StopAsync(TestContext.Current.CancellationToken);
+        }
+    }
+
+    [Theory]
+    [InlineData("[]")]
+    [InlineData("null")]
+    [InlineData("42")]
+    [InlineData("\"just a string\"")]
+    public async Task ANonObjectJsonRootGetsATypedErrorReplyRatherThanADisconnectedPipe(string nonObjectJsonBody)
+    {
+        // Regression test: JsonDocument.Parse succeeds for any syntactically valid JSON text,
+        // including a non-object root, but JsonElement.TryGetProperty is documented to throw
+        // InvalidOperationException (not JsonException) whenever RootElement.ValueKind isn't
+        // JsonValueKind.Object. Unguarded, that exception used to escape ProcessRequest entirely
+        // and land in ServiceConnectionAsync's `catch (Exception ex) when (ex is IOException or
+        // InvalidOperationException)` clause -- meant for "the client disconnected mid-exchange"
+        // -- silently closing the connection instead of returning the documented ErrorReply a
+        // malformed request must get. Written directly via IpcFraming.WriteFrameAsync, not
+        // through IpcClient, since IpcClient only ever sends real IpcCommand instances and could
+        // never produce a non-object body.
+        var processor = new IpcCommandProcessor(daemonVersion: "1.2.3-test");
+        using var pump = new IpcCommandServerPump(processor, NullLogger<IpcCommandServerPump>.Instance);
+        await pump.StartAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
+        try
+        {
+            var client = new NamedPipeClientStream(
+                ".", IpcPipeNames.Command, PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+            try
+            {
+                await client.ConnectAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken).ConfigureAwait(true);
+
+                byte[] requestBody = Encoding.UTF8.GetBytes(nonObjectJsonBody);
+                await IpcFraming.WriteFrameAsync(client, requestBody, TestContext.Current.CancellationToken).ConfigureAwait(true);
+
+                byte[] responseBody = await IpcFraming.ReadFrameAsync(client, TestContext.Current.CancellationToken).ConfigureAwait(true);
+                IpcReply reply = JsonSerializer.Deserialize(responseBody, IpcJsonContext.Default.IpcReply)
+                    ?? throw new InvalidOperationException("Test setup failure: IPC reply deserialized to null.");
+
+                ErrorReply error = Assert.IsType<ErrorReply>(reply);
+                Assert.Contains("Malformed IPC request", error.Message, StringComparison.Ordinal);
+            }
+            finally
+            {
+                await client.DisposeAsync().ConfigureAwait(true);
+            }
+        }
+        finally
+        {
+            await pump.StopAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
         }
     }
 

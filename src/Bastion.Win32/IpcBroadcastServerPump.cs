@@ -125,26 +125,50 @@ internal sealed partial class IpcBroadcastServerPump(ILogger<IpcBroadcastServerP
     }
 
     /// <inheritdoc/>
-    public async Task PublishAsync(IpcReply reply, CancellationToken cancellationToken)
+    /// <remarks>
+    /// <b>Fans out to every subscriber concurrently, not one at a time.</b> Each subscriber's
+    /// write-or-prune runs as its own <see cref="Task"/> (<see cref="WriteOrPruneAsync"/>), and
+    /// this method awaits all of them together via <see cref="Task.WhenAll(IEnumerable{Task})"/>.
+    /// The per-subscriber pipe has a finite (4096-byte) write quota (<see cref="CreatePipe"/>'s
+    /// own remarks), so a subscriber that stops reading -- a frozen/crashed <c>bastion-bar</c>, a
+    /// suspended <c>bastionc --watch</c> session -- eventually blocks its own write until either
+    /// it drains or <paramref name="cancellationToken"/> cancels (`CreateNamedPipeW`'s documented
+    /// remarks, already cited on both pumps' <c>CreatePipe</c> methods). A strictly sequential
+    /// <see langword="foreach"/> over <see cref="_subscribers"/> would let that one stuck
+    /// subscriber's blocked write delay delivery to every subscriber enumerated after it; running
+    /// the writes concurrently means the healthy subscribers' writes complete independently of the
+    /// stuck one instead of queuing behind it -- the same "a slow/frozen client must not couple
+    /// back into daemon latency" hazard docs/engineering/json-ipc-config.md §5 forbids for
+    /// synchronous pipe I/O on a pump thread, applied here to async I/O serialized by a loop.
+    /// This does not, by itself, stop the composite <see cref="Task"/> this method returns from
+    /// waiting on the stuck subscriber too -- a fuller per-subscriber bounded-queue decoupling
+    /// (so this method's own return never blocks on the slowest subscriber) would fix that, but is
+    /// not yet justified for a v0.1 primitive with no production caller (see
+    /// <see cref="IIpcBroadcastPublisher"/>'s own remarks).
+    /// </remarks>
+    public Task PublishAsync(IpcReply reply, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(reply);
 
         byte[] payload = JsonSerializer.SerializeToUtf8Bytes(reply, IpcJsonContext.Default.IpcReply);
-        foreach (NamedPipeServerStream subscriber in _subscribers.Keys)
+        return Task.WhenAll(_subscribers.Keys.Select(subscriber => WriteOrPruneAsync(subscriber, payload, cancellationToken)));
+    }
+
+    /// <summary>Writes <paramref name="payload"/> to <paramref name="subscriber"/>, pruning it from <see cref="_subscribers"/> on a failed write.</summary>
+    private async Task WriteOrPruneAsync(NamedPipeServerStream subscriber, byte[] payload, CancellationToken cancellationToken)
+    {
+        try
         {
-            try
+            await IpcFraming.WriteFrameAsync(subscriber, payload, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or InvalidOperationException)
+        {
+            // The subscriber went away since it last connected -- see this type's remarks for
+            // why detection is lazy, on this exact failed-write path, rather than proactive.
+            LogSubscriberLost(ex);
+            if (_subscribers.TryRemove(subscriber, out _))
             {
-                await IpcFraming.WriteFrameAsync(subscriber, payload, cancellationToken).ConfigureAwait(false);
-            }
-            catch (Exception ex) when (ex is IOException or InvalidOperationException)
-            {
-                // The subscriber went away since it last connected -- see this type's remarks for
-                // why detection is lazy, on this exact failed-write path, rather than proactive.
-                LogSubscriberLost(ex);
-                if (_subscribers.TryRemove(subscriber, out _))
-                {
-                    await subscriber.DisposeAsync().ConfigureAwait(false);
-                }
+                await subscriber.DisposeAsync().ConfigureAwait(false);
             }
         }
     }
