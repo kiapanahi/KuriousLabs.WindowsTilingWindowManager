@@ -23,15 +23,16 @@ namespace Bastion.TestWindows;
 /// <c>DestroyWindow</c>, whose contract is "a thread cannot use <c>DestroyWindow</c> to destroy a
 /// window created by a different thread": a driving harness is always a different process/thread,
 /// so it can request a close but can never call <c>DestroyWindow</c> on this window directly, only
-/// this process's own main thread ever legally can. <b>Internally, via stdin EOF</b>
-/// (<see cref="WatchStdinForEof"/>): covers the no-leak requirement (GitHub issue #13's acceptance
+/// this process's own main thread ever legally can. <b>Internally, via stdin</b>
+/// (<see cref="WatchStdinForShutdownSignal"/>): covers the no-leak requirement (GitHub issue #13's acceptance
 /// criteria) for a harness that dies mid-assertion without ever sending that external close request.
-/// This process's own dedicated background thread blocks on stdin and posts <c>WM_CLOSE</c> to
-/// itself the moment that pipe hits EOF — which happens automatically once a redirecting harness's
-/// process exits, cleanly or not — routing through the exact same <c>WM_CLOSE</c> -&gt;
-/// <c>DefWindowProc</c> -&gt; <c>DestroyWindow</c> -&gt; <c>WM_DESTROY</c> -&gt;
-/// <c>PostQuitMessage(0)</c> path as the external case, rather than a second, parallel exit
-/// mechanism.
+/// This process's own dedicated background thread blocks on a single stdin read and posts
+/// <c>WM_CLOSE</c> to itself as soon as that read returns — either an explicit "please exit" line a
+/// still-alive harness chooses to write, or EOF, which happens automatically once a redirecting
+/// harness's process exits, cleanly or not; content is never inspected, so either outcome is treated
+/// identically — routing through the exact same <c>WM_CLOSE</c> -&gt; <c>DefWindowProc</c> -&gt;
+/// <c>DestroyWindow</c> -&gt; <c>WM_DESTROY</c> -&gt; <c>PostQuitMessage(0)</c> path as the external
+/// case, rather than a second, parallel exit mechanism.
 /// </para>
 /// <para>
 /// TODO(DESIGN.md §11): the harness-side driver that asserts via
@@ -172,8 +173,8 @@ internal static class TestWindowSpawner
         options.OwnerHwnd is { } owner ? new HWND(owner) : HWND.Null;
 
     /// <summary>
-    /// Starts the dedicated background thread that watches for stdin EOF (see this type's remarks
-    /// and <see cref="WatchStdinForEof"/>). <c>IsBackground = true</c> is deliberate, and is the
+    /// Starts the dedicated background thread that watches stdin for a shutdown signal (see this
+    /// type's remarks and <see cref="WatchStdinForShutdownSignal"/>). <c>IsBackground = true</c> is deliberate, and is the
     /// opposite of <c>InputPumpService</c>'s/<c>WinEventPumpService</c>'s/<c>ShellComThread</c>'s
     /// own dedicated pump threads (which set <c>IsBackground = false</c> because the daemon owns an
     /// explicit, deterministic stop signal for them): nothing in this small standalone tool ever
@@ -184,7 +185,7 @@ internal static class TestWindowSpawner
     /// </summary>
     private static void StartStdinWatcher(HWND hwnd)
     {
-        new Thread(() => WatchStdinForEof(hwnd))
+        new Thread(() => WatchStdinForShutdownSignal(hwnd))
         {
             Name = "Bastion.TestWindows.StdinWatcher",
             IsBackground = true,
@@ -192,28 +193,31 @@ internal static class TestWindowSpawner
     }
 
     /// <summary>
-    /// Runs on the dedicated background thread <see cref="Run"/> starts. Blocks on this process's
-    /// own stdin until EOF, then posts <c>WM_CLOSE</c> to <paramref name="hwnd"/> — see this type's
-    /// remarks for why this exists and why the request has to be posted rather than calling
-    /// <c>DestroyWindow</c> directly from here.
+    /// Runs on the dedicated background thread <see cref="Run"/> starts. Blocks on a single read of
+    /// this process's own stdin, then posts <c>WM_CLOSE</c> to <paramref name="hwnd"/> regardless of
+    /// whether that read returned a line or EOF — see this type's remarks for why this exists and
+    /// why the request has to be posted rather than calling <c>DestroyWindow</c> directly from here.
     /// </summary>
     [SuppressMessage(
         "Design",
         "CA1031:Do not catch general exception types",
         Justification = "Top-level fault barrier for this dedicated thread: whatever goes wrong " +
-            "while watching for stdin EOF must still fall through to requesting the window close, " +
-            "and an unhandled exception here would otherwise silently crash the whole process " +
-            "without ever posting WM_CLOSE.")]
-    private static void WatchStdinForEof(HWND hwnd)
+            "while watching stdin must still fall through to requesting the window close, and an " +
+            "unhandled exception here would otherwise silently crash the whole process without " +
+            "ever posting WM_CLOSE.")]
+    private static void WatchStdinForShutdownSignal(HWND hwnd)
     {
         try
         {
-            // Content is irrelevant — only EOF (ReadLine returning null) is the close signal, so an
-            // explicit "please exit" line written by a still-alive harness works identically to that
-            // harness's redirected stdin pipe simply closing because its process died.
-            while (Console.In.ReadLine() is not null)
-            {
-            }
+            // A single call is enough, and deliberately not a loop: ReadLine returns on either a
+            // harness's explicit "please exit" line (any content — a non-null return) or EOF (a
+            // null return), and both mean the same thing here, so either return value should fall
+            // through to the close request below immediately. A `while (... is not null)` loop
+            // would instead discard that first line and block again waiting for a *second* one (or
+            // EOF) before ever closing — indefinitely, if a harness writes its signal line but
+            // deliberately keeps its own end of the pipe open afterward (e.g. to keep watching the
+            // child before its own exit). Content is genuinely never inspected either way.
+            Console.In.ReadLine();
         }
         catch (Exception ex)
         {
