@@ -40,7 +40,9 @@ public sealed class WindowRulesSchemaTests
         }
         finally
         {
-            Directory.Delete(tempDirectory, recursive: true);
+            // Best-effort, matching every other test fixture's cleanup in this project: a transient
+            // file lock (e.g. antivirus/indexer) must not fail an otherwise-successful test.
+            TryDeleteDirectory(tempDirectory);
         }
     }
 
@@ -58,7 +60,23 @@ public sealed class WindowRulesSchemaTests
         }
         finally
         {
-            Directory.Delete(tempDirectory, recursive: true);
+            // Best-effort, matching every other test fixture's cleanup in this project: a transient
+            // file lock (e.g. antivirus/indexer) must not fail an otherwise-successful test.
+            TryDeleteDirectory(tempDirectory);
+        }
+    }
+
+    private static void TryDeleteDirectory(string path)
+    {
+        try
+        {
+            Directory.Delete(path, recursive: true);
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
         }
     }
 }

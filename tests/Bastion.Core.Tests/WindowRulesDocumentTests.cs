@@ -87,6 +87,64 @@ public sealed class WindowRulesDocumentTests
     }
 
     [Fact]
+    public void MergeCollapsesADuplicateNameWithinTheShippedSideToItsLastOccurrence()
+    {
+        // Regression test (caught in review): an earlier implementation only repointed the
+        // name-to-index lookup at the later of two same-named shipped rules while still appending
+        // the earlier one too, so both survived and a subsequent overlay-side override by that name
+        // reached only whichever duplicate the lookup pointed at.
+        WindowRulesDocument shipped = DocumentOf(
+            Rule("dup", WindowRuleAction.Ignore, notes: "first"),
+            Rule("dup", WindowRuleAction.Floating, notes: "second"));
+
+        var merged = WindowRulesDocument.Merge(shipped, WindowRulesDocument.Empty);
+
+        WindowRule only = Assert.Single(merged.Rules);
+        Assert.Equal("second", only.Notes);
+    }
+
+    [Fact]
+    public void MergeCollapsesADuplicateNameWithinTheShippedSideAndStillAppliesTheOverlayOverride()
+    {
+        WindowRulesDocument shipped = DocumentOf(
+            Rule("dup", WindowRuleAction.Ignore, notes: "first"),
+            Rule("dup", WindowRuleAction.Floating, notes: "second"));
+        WindowRulesDocument overlay = DocumentOf(Rule("dup", WindowRuleAction.Manage, notes: "override"));
+
+        var merged = WindowRulesDocument.Merge(shipped, overlay);
+
+        WindowRule only = Assert.Single(merged.Rules);
+        Assert.Equal(WindowRuleAction.Manage, only.Action);
+        Assert.Equal("override", only.Notes);
+    }
+
+    [Fact]
+    public void ValidateRulesReturnsNoProblemsForAWellFormedDocument()
+    {
+        WindowRulesDocument document = DocumentOf(Rule("ok", WindowRuleAction.Ignore));
+
+        Assert.Empty(document.ValidateRules());
+    }
+
+    [Fact]
+    public void ValidateRulesReportsARuleWithNoMatchCriteria()
+    {
+        WindowRulesDocument document = DocumentOf(new WindowRule { Name = "matches-nothing", Match = new WindowRuleMatch(), Action = WindowRuleAction.Ignore });
+
+        Assert.Single(document.ValidateRules());
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void ValidateRulesReportsAnEmptyOrWhitespaceOnlyName(string name)
+    {
+        WindowRulesDocument document = DocumentOf(new WindowRule { Name = name, Match = new WindowRuleMatch { ClassName = "X" }, Action = WindowRuleAction.Ignore });
+
+        Assert.Single(document.ValidateRules());
+    }
+
+    [Fact]
     public void EqualsComparesSeparatelyConstructedButContentIdenticalDocumentsAsEqual()
     {
         // Mirrors JournalDocument's own tested footgun (docs/engineering/daemon-architecture.md §5,

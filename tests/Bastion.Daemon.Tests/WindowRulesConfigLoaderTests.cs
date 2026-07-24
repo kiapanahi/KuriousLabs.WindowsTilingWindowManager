@@ -126,6 +126,74 @@ public sealed class WindowRulesConfigLoaderTests : IDisposable
         Assert.Throws<System.Text.Json.JsonException>(() => loader.LoadMerged());
     }
 
+    [Fact]
+    public async Task LoadMergedThrowsJsonExceptionWhenARuleHasNoMatchCriteria()
+    {
+        // Deserializes fine (an empty "match": {} is syntactically valid) -- rejected by
+        // WindowRulesDocument.ValidateRules, run inside LoadMerged itself specifically so this
+        // business rule applies identically whether loaded here (startup) or from
+        // WindowRulesHotReloadService's debounce callback (hot-reload) -- see this type's own
+        // remarks and WindowRulesHotReloadServiceTests.FailedReload... for the hot-reload half.
+        await File.WriteAllTextAsync(
+            ShippedPath,
+            """
+            { "rules": [ { "name": "matches-nothing", "match": {}, "action": "Ignore" } ] }
+            """,
+            TestContext.Current.CancellationToken);
+        WindowRulesConfigLoader loader = CreateLoader();
+
+        Assert.Throws<System.Text.Json.JsonException>(() => loader.LoadMerged());
+    }
+
+    [Fact]
+    public async Task LoadMergedThrowsJsonExceptionWhenARulePresentsAnEmptyName()
+    {
+        // Distinct from the "missing name" case above: "name" is present but empty, which
+        // System.Text.Json's required-member enforcement alone does not reject (the property *was*
+        // supplied) -- WindowRulesDocument.ValidateRules catches this one instead.
+        await File.WriteAllTextAsync(
+            ShippedPath,
+            """
+            { "rules": [ { "name": "", "match": { "className": "X" }, "action": "Ignore" } ] }
+            """,
+            TestContext.Current.CancellationToken);
+        WindowRulesConfigLoader loader = CreateLoader();
+
+        Assert.Throws<System.Text.Json.JsonException>(() => loader.LoadMerged());
+    }
+
+    [Fact]
+    public async Task LoadMergedCollapsesADuplicateNameWithinTheShippedFileAndStillAppliesTheUserOverride()
+    {
+        // Regression test for a merge bug caught in review: two shipped rules sharing one name used
+        // to both survive in the output (only the name-to-index lookup was repointed, not the
+        // earlier entry itself), so a user override by that name only ever reached whichever
+        // duplicate the lookup pointed at, leaving the other a stale, un-overridden leftover.
+        await File.WriteAllTextAsync(
+            ShippedPath,
+            """
+            {
+                "rules": [
+                    { "name": "dup", "match": { "className": "First" }, "action": "Ignore" },
+                    { "name": "dup", "match": { "className": "Second" }, "action": "Floating" }
+                ]
+            }
+            """,
+            TestContext.Current.CancellationToken);
+        await File.WriteAllTextAsync(
+            UserPath,
+            """
+            { "rules": [ { "name": "dup", "match": { "className": "Second" }, "action": "Manage" } ] }
+            """,
+            TestContext.Current.CancellationToken);
+        WindowRulesConfigLoader loader = CreateLoader();
+
+        WindowRulesDocument merged = loader.LoadMerged();
+
+        WindowRule only = Assert.Single(merged.Rules);
+        Assert.Equal(WindowRuleAction.Manage, only.Action);
+    }
+
     private WindowRulesConfigLoader CreateLoader() => new(new WindowRulesConfigPaths
     {
         ShippedRulesFilePath = ShippedPath,

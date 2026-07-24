@@ -31,11 +31,16 @@ namespace Bastion.Daemon;
 /// A missing file (fresh install: no user overlay yet; a broken install: no shipped file) is the
 /// routine, expected "no rules from this side" case, not an error — mirrors
 /// <c>Bastion.Win32.HwndJournalStore.ReadAsync</c>'s identical treatment of a missing journal file.
-/// Any other <see cref="JsonException"/> (malformed JSON, a rule failing its
-/// <see langword="required"/> members) propagates to the caller, which decides what "malformed"
-/// means for its own boundary — fail-fast at startup
-/// (<c>docs/engineering/daemon-architecture.md</c> §4) vs. keep-serving-the-last-known-good on a
-/// hot-reload (DESIGN.md §3.9) are two different callers' policies, not this loader's.
+/// Any other <see cref="JsonException"/> — malformed JSON, a rule failing its
+/// <see langword="required"/> members during deserialization, or a syntactically-valid-but-
+/// semantically-invalid merged result per <see cref="WindowRulesDocument.ValidateRules"/> (an empty
+/// name, a rule matching nothing) — propagates to the caller, which decides what "malformed" means
+/// for its own boundary: fail-fast at startup (<c>docs/engineering/daemon-architecture.md</c> §4)
+/// vs. keep-serving-the-last-known-good on a hot-reload (DESIGN.md §3.9) are two different callers'
+/// policies, not this loader's. Running <see cref="WindowRulesDocument.ValidateRules"/> here — not
+/// only via <c>Bastion.Daemon</c>'s Options-pipeline validation, which the hot-reload path never
+/// goes through at all — is what makes that business-rule check apply identically to both callers
+/// (caught in review; see <see cref="WindowRulesDocument.ValidateRules"/>'s own remarks).
 /// </para>
 /// </remarks>
 internal sealed class WindowRulesConfigLoader(WindowRulesConfigPaths paths)
@@ -45,7 +50,15 @@ internal sealed class WindowRulesConfigLoader(WindowRulesConfigPaths paths)
     {
         WindowRulesDocument shipped = LoadDocument(paths.ShippedRulesFilePath);
         WindowRulesDocument overlay = LoadDocument(paths.UserRulesFilePath);
-        return WindowRulesDocument.Merge(shipped, overlay);
+        var merged = WindowRulesDocument.Merge(shipped, overlay);
+
+        List<string> problems = [.. merged.ValidateRules()];
+        if (problems.Count > 0)
+        {
+            throw new JsonException(string.Join(" ", problems));
+        }
+
+        return merged;
     }
 
     private static WindowRulesDocument LoadDocument(string path)

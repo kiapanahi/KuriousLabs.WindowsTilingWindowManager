@@ -107,6 +107,38 @@ public sealed class WindowRulesHotReloadServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ReloadWithARuleHavingNoMatchCriteriaIsRejectedLikeAnyOtherInvalidLoad()
+    {
+        // Regression test for the exact gap caught in review: a hot-reloaded rule with no match
+        // criteria (which would match every window) must be rejected the same way startup rejects
+        // it, not silently accepted just because this path never goes through the Options pipeline.
+        // WindowRulesConfigLoader.LoadMerged now enforces WindowRulesDocument.ValidateRules itself,
+        // so this is exercised identically to any other LoadMerged failure -- no separate code path.
+        await WriteShippedRuleAsync("good", WindowRuleAction.Ignore);
+        PublishedWindowRulesConfig published = CreatePublished(initialRules: []);
+        using WindowRulesHotReloadService service = CreateService(published);
+        await service.StartAsync(TestContext.Current.CancellationToken);
+
+        _watcher.RaiseChanged();
+        _time.Advance(s_debounce);
+        Assert.Equal(1, _notifier.SucceededCallCount);
+        WindowRulesDocument beforeInvalidReload = published.Current;
+
+        await File.WriteAllTextAsync(
+            ShippedPath,
+            """
+            { "rules": [ { "name": "matches-nothing", "match": {}, "action": "Ignore" } ] }
+            """,
+            TestContext.Current.CancellationToken);
+        _watcher.RaiseChanged();
+        _time.Advance(s_debounce);
+
+        Assert.Single(_notifier.FailureReasons);
+        Assert.Equal(beforeInvalidReload, published.Current);
+        Assert.Equal(1, _notifier.SucceededCallCount);
+    }
+
+    [Fact]
     public async Task StopAsyncStopsTheWatcherAndFurtherChangesAreIgnored()
     {
         await WriteShippedRuleAsync("a", WindowRuleAction.Ignore);

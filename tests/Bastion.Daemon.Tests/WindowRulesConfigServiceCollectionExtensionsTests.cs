@@ -64,12 +64,16 @@ public sealed class WindowRulesConfigServiceCollectionExtensionsTests : IDisposa
     }
 
     [Fact]
-    public async Task HostStartAsyncFailsFastWithOptionsValidationExceptionWhenARuleHasEmptyMatchCriteria()
+    public async Task HostStartAsyncFailsFastWithJsonExceptionWhenARuleHasEmptyMatchCriteria()
     {
         // Parses fine -- WindowRuleMatch with every field null/omitted is valid JSON -- but is
-        // rejected by the .Validate(...) cross-field check registered alongside
-        // WindowRulesOptionsValidator (see AddWindowRulesConfiguration's remarks: a rule matching
-        // nothing would silently apply its action to every window).
+        // rejected by WindowRulesDocument.ValidateRules, run inside WindowRulesConfigLoader.LoadMerged
+        // itself (see that type's remarks: a rule matching nothing would silently apply its action
+        // to every window, and this check must reject it identically whether loaded at startup or
+        // via hot-reload, so it lives in the loader rather than only in the Options pipeline).
+        // The loader throws JsonException directly out of the Configure delegate, before
+        // WindowRulesOptionsValidator's own (still-registered, still-real) check ever gets a chance
+        // to run -- see WindowRulesOptionsValidatorTests for direct, isolated proof it still works.
         await File.WriteAllTextAsync(
             Paths.ShippedRulesFilePath,
             """
@@ -81,16 +85,17 @@ public sealed class WindowRulesConfigServiceCollectionExtensionsTests : IDisposa
         builder.Services.AddWindowRulesConfiguration(Paths);
         using IHost host = builder.Build();
 
-        await Assert.ThrowsAsync<OptionsValidationException>(
+        await Assert.ThrowsAsync<System.Text.Json.JsonException>(
             () => host.StartAsync(TestContext.Current.CancellationToken));
     }
 
     [Fact]
-    public async Task HostStartAsyncFailsFastWithOptionsValidationExceptionWhenARuleHasAnEmptyName()
+    public async Task HostStartAsyncFailsFastWithJsonExceptionWhenARuleHasAnEmptyName()
     {
-        // WindowRule.Name carries [Required] (whose default AllowEmptyStrings=false already
-        // rejects "") -- exercised via WindowRulesOptionsValidator's [OptionsValidator]-generated,
-        // [ValidateEnumeratedItems]-recursed check, not the .Validate(...) lambda.
+        // WindowRulesDocument.ValidateRules (run inside WindowRulesConfigLoader.LoadMerged) rejects
+        // an empty/whitespace-only name the same way it rejects an empty match -- see the previous
+        // test's remarks for why this now throws JsonException from the loader rather than
+        // OptionsValidationException from WindowRulesOptionsValidator's [Required] check.
         await File.WriteAllTextAsync(
             Paths.ShippedRulesFilePath,
             """
@@ -102,7 +107,7 @@ public sealed class WindowRulesConfigServiceCollectionExtensionsTests : IDisposa
         builder.Services.AddWindowRulesConfiguration(Paths);
         using IHost host = builder.Build();
 
-        await Assert.ThrowsAsync<OptionsValidationException>(
+        await Assert.ThrowsAsync<System.Text.Json.JsonException>(
             () => host.StartAsync(TestContext.Current.CancellationToken));
     }
 

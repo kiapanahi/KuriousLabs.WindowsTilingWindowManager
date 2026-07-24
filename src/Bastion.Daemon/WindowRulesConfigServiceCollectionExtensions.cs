@@ -53,20 +53,23 @@ internal static class WindowRulesConfigServiceCollectionExtensions
         services.TryAddSingleton<PublishedWindowRulesConfig>();
         services.TryAddSingleton<IPublishedWindowRulesConfig>(static sp => sp.GetRequiredService<PublishedWindowRulesConfig>());
 
-        // Startup fail-fast gate (docs/engineering/daemon-architecture.md §4): [OptionsValidator]-
-        // generated DataAnnotations checks via WindowRulesOptionsValidator, plus one cross-field
-        // check (WindowRuleMatch.IsEmpty) DataAnnotations attributes can't themselves express --
-        // both run because AddOptionsWithValidateOnStart's two-generic-parameter overload registers
-        // the former and .Validate registers the latter as a second, independently-enumerated
-        // IValidateOptions<WindowRulesOptions>. IHost.StartAsync calls IStartupValidator.Validate()
-        // before any hosted service starts, which forces this Configure delegate (the loader) to
-        // run and throws OptionsValidationException on failure -- see PublishedWindowRulesConfig's
-        // remarks for why that is a real, verified mechanism, not an assumption.
+        // Startup fail-fast gate (docs/engineering/daemon-architecture.md §4): IHost.StartAsync
+        // calls IStartupValidator.Validate() before any hosted service starts, which forces this
+        // Configure delegate to run -- see PublishedWindowRulesConfig's remarks for why that is a
+        // real, verified mechanism, not an assumption. The Configure delegate itself
+        // (loader.LoadMerged()) already enforces every business rule the merged document must
+        // satisfy -- required members during deserialization, plus WindowRulesDocument.ValidateRules
+        // (empty name, empty match) -- identically for both this startup path and the hot-reload
+        // path (WindowRulesHotReloadService), which never goes through Options at all; a malformed
+        // load therefore throws JsonException directly out of this Configure delegate before
+        // WindowRulesOptionsValidator's own check ever runs. WindowRulesOptionsValidator +
+        // [Required] on WindowRule.Name remain registered as the [OptionsValidator]-generated,
+        // reflection-free mechanism this issue's acceptance criteria explicitly calls for
+        // (docs/engineering/daemon-architecture.md §4: "not ValidateDataAnnotations()") and as a
+        // defense-in-depth safety net if the loader's own check is ever weakened -- see
+        // WindowRulesOptionsValidatorTests for direct, isolated proof it independently works.
         services.AddOptionsWithValidateOnStart<WindowRulesOptions, WindowRulesOptionsValidator>()
-            .Configure<WindowRulesConfigLoader>(static (options, loader) => options.Rules = loader.LoadMerged().Rules)
-            .Validate(
-                static options => options.Rules.All(static rule => !rule.Match.IsEmpty),
-                "Every window rule must specify at least one match criterion (appUserModelId, executablePath, or className).");
+            .Configure<WindowRulesConfigLoader>(static (options, loader) => options.Rules = loader.LoadMerged().Rules);
 
         services.AddSingleton<IHostedService>(static sp => new WindowRulesHotReloadService(
             sp.GetRequiredService<IConfigDirectoryWatcher>(),

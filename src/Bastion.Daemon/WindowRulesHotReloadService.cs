@@ -34,17 +34,34 @@ namespace Bastion.Daemon;
 /// uses.
 /// </para>
 /// <para>
-/// <b>Failure handling.</b> <see cref="WindowRulesConfigLoader.LoadMerged"/> throwing
-/// (malformed JSON, a rule missing a <see langword="required"/> member, an empty
-/// <see cref="WindowRuleMatch"/>) is caught, reported via
-/// <see cref="IWindowRulesReloadNotifier.NotifyReloadFailed"/>, and otherwise swallowed —
-/// <see cref="PublishedWindowRulesConfig"/> is never touched on this path, so the previously-
-/// published config keeps serving unchanged (DESIGN.md §3.9's "parse errors keep the old config").
-/// This is the hot-reload boundary's policy specifically; the *startup* boundary
+/// <b>Failure handling.</b> <see cref="WindowRulesConfigLoader.LoadMerged"/> throwing — malformed
+/// JSON, a rule missing a <see langword="required"/> member, or any
+/// <see cref="WindowRulesDocument.ValidateRules"/> violation (an empty name, an empty
+/// <see cref="WindowRuleMatch"/>) — is caught broadly (any exception except
+/// <see cref="OperationCanceledException"/>, not a narrow allow-list of specific exception types —
+/// widened after review: a <see cref="TimerCallback"/> that lets an unanticipated exception type
+/// escape can bring down the whole process, and this callback's whole point is "a reload attempt
+/// failed for some reason," not "a reload attempt failed for one of these three specific reasons")
+/// and reported via <see cref="IWindowRulesReloadNotifier.NotifyReloadFailed"/> rather than
+/// propagating. <see cref="PublishedWindowRulesConfig"/> is never touched on this path, so the
+/// previously-published config keeps serving unchanged (DESIGN.md §3.9's "parse errors keep the old
+/// config"). This is the hot-reload boundary's policy specifically; the *startup* boundary
 /// (<c>WindowRulesOptionsValidator</c> + <c>AddOptionsWithValidateOnStart</c>) instead fails
 /// <c>bastiond</c> fast, since there is no "old config" yet to fall back to on the very first load
 /// (<c>docs/engineering/daemon-architecture.md</c> §4) — both postures coexist by construction,
 /// since they are two different code paths reading the same loader.
+/// </para>
+/// <para>
+/// <b>An in-flight callback no-ops after <see cref="StopAsync"/>, rather than still reloading and
+/// publishing</b> (caught in review): <see cref="System.Threading.Timer"/>'s own documented race —
+/// a callback already queued on a thread-pool thread can still run even after the timer that
+/// scheduled it has been disposed — means <see cref="OnDebounceElapsed"/> can start executing after
+/// <see cref="StopAsync"/> has already disposed <see cref="_debounceTimer"/>. <see cref="_stopped"/>
+/// (guarded by <see cref="_gate"/>, checked once before the (possibly slow) file read and again,
+/// atomically with the publish itself, immediately before <see cref="PublishedWindowRulesConfig.Publish"/>)
+/// closes this so a "stopped" service can never still swap in a new snapshot or fire a late
+/// notification — matching <c>Bastion.Win32.Coalescer.FlushLocked</c>'s identical
+/// re-check-after-reacquiring-the-lock pattern for the same class of timer-outlives-dispose race.
 /// </para>
 /// </remarks>
 [SuppressMessage(
@@ -69,6 +86,7 @@ internal sealed class WindowRulesHotReloadService : IHostedService, IDisposable
     private readonly Lock _gate = new();
     private readonly TimerCallback _onDebounceElapsed;
     private ITimer? _debounceTimer;
+    private bool _stopped;
 
     public WindowRulesHotReloadService(
         IConfigDirectoryWatcher watcher,
@@ -113,6 +131,7 @@ internal sealed class WindowRulesHotReloadService : IHostedService, IDisposable
         _watcher.Stop();
         lock (_gate)
         {
+            _stopped = true;
             _debounceTimer?.Dispose();
             _debounceTimer = null;
         }
@@ -137,13 +156,35 @@ internal sealed class WindowRulesHotReloadService : IHostedService, IDisposable
 
     private void OnDebounceElapsed(object? state)
     {
+        lock (_gate)
+        {
+            if (_stopped)
+            {
+                return;
+            }
+        }
+
         try
         {
             WindowRulesDocument merged = _loader.LoadMerged();
-            _published.Publish(merged);
+
+            lock (_gate)
+            {
+                // Re-checked here, atomically with the publish itself: StopAsync may have run
+                // (and disposed the timer) between the check above and this possibly-slow file
+                // read completing -- see this type's remarks for the timer-outlives-dispose race
+                // this guards against.
+                if (_stopped)
+                {
+                    return;
+                }
+
+                _published.Publish(merged);
+            }
+
             _notifier.NotifyReloadSucceeded();
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _notifier.NotifyReloadFailed(ex.Message);
         }
