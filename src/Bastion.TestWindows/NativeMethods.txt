@@ -6,6 +6,7 @@ TranslateMessage
 DispatchMessage
 DestroyWindow
 PostQuitMessage
+PostMessage
 GetModuleHandle
 LoadCursor
 IDC_ARROW
@@ -13,5 +14,6 @@ ShowWindow
 UpdateWindow
 CW_USEDEFAULT
 WM_DESTROY
+WM_CLOSE
 WM_GETMINMAXINFO
 MINMAXINFO
