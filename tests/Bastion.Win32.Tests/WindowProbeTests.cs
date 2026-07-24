@@ -57,4 +57,36 @@ public sealed class WindowProbeTests
             Assert.Equal(window, WindowProbe.GetRootAncestor(window));
         }
     }
+
+    [Fact]
+    public void ExtendedFrameBoundsAreWellFormedWhenQueryable()
+    {
+        IReadOnlyList<HWND> windows = WindowProbe.EnumerateVisibleTopLevelWindows();
+
+        foreach (HWND window in windows)
+        {
+            // A window can legitimately be destroyed between enumeration and this call, or the
+            // DWM read itself can fail for other reasons — a routine race (this method's own doc
+            // remarks), not a test failure.
+            if (WindowProbe.TryGetExtendedFrameBounds(window, out RECT frameBounds))
+            {
+                Assert.True(frameBounds.right >= frameBounds.left);
+                Assert.True(frameBounds.bottom >= frameBounds.top);
+            }
+        }
+    }
+
+    [Fact]
+    public void GetExtendedStyleNeverThrowsForAnyEnumeratedWindow()
+    {
+        IReadOnlyList<HWND> windows = WindowProbe.EnumerateVisibleTopLevelWindows();
+
+        foreach (HWND window in windows)
+        {
+            // GetWindowLongW has no documented failure mode distinct from "returns 0" (which is
+            // itself a valid, all-styles-clear reading) -- this only asserts the call never throws
+            // for whatever a live desktop has open.
+            _ = WindowProbe.GetExtendedStyle(window);
+        }
+    }
 }

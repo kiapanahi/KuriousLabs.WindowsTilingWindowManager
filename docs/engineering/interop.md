@@ -457,21 +457,72 @@ caller.
 
 ## 6. Error handling at the P/Invoke boundary
 
-**[uncertain — verify before relying]** The interaction of `SetLastError`
-semantics with CsWin32-generated wrappers under `DisableRuntimeMarshalling`
-was not independently re-verified against a real generated sample this
-session. What's confirmed generally: `DisableRuntimeMarshallingAttribute`
-documents that it disables built-in `SetLastError` support for P/Invokes
-outright (§1.2), and `LibraryImportAttribute` carries its own `SetLastError`
-property that must be set explicitly per-method to opt back in to
-`Marshal.GetLastWin32Error()` capturing the right value. Before writing
-error-handling code in `Bastion.Win32` that reads `GetLastError()` after a
-CsWin32-generated call (e.g. the UIPI detection path in DESIGN.md §3.6, which
-depends on `GetLastError() == ERROR_ACCESS_DENIED` after a failed
-`SetWindowPos`/`ShowWindow`): open the actual generated partial method for
-that specific API and confirm whether `[LibraryImport(SetLastError = true)]`
-is present, rather than assuming DllImport-era `[DllImport(SetLastError = true)]`
-behavior carries over unchanged.
+**Correction (verified against the actual generated output while implementing
+issue #5): CsWin32 (pinned 0.3.298) does not emit `[LibraryImport]` for plain
+P/Invokes at all — this section's prior framing ("confirm whether
+`[LibraryImport(SetLastError = true)]` is present") was the wrong question.**
+Inspecting `obj/**/Generated/CsWin32/Windows.Win32.NativeMethods.g.cs` for
+`SetWindowPos`, `SetWindowPlacement`, `BeginDeferWindowPos`, `DeferWindowPos`,
+and `EndDeferWindowPos` (the calls GitHub issue #5's Placement Executor needed)
+shows every one of them is classic `[DllImport]` — matching
+`Bastion.Win32.csproj`'s own documented project-level `RS0030` suppression,
+which already states "CsWin32 ... has no setting to emit `[LibraryImport]` for
+plain P/Invokes instead." For any API whose underlying win32metadata marks it
+`SetLastError=true` (all five above, plus already-in-use APIs like
+`GetWindowRect`, `OpenProcess`, `QueryFullProcessImageNameW`, `EnumWindows`,
+`GetMessageW`, `PostThreadMessageW`, `GetWindowLongW`, `GetClassNameW`,
+`GetWindow`), CsWin32 generates a friendly wrapper method that does exactly:
+
+```csharp
+internal static BOOL SetWindowPos(HWND hWnd, [Optional] HWND hWndInsertAfter, int X, int Y, int cx, int cy, SET_WINDOW_POS_FLAGS uFlags)
+{
+    Marshal.SetLastSystemError(0);
+    BOOL __retVal = LocalExternFunction(hWnd, hWndInsertAfter, X, Y, cx, cy, uFlags);
+    Marshal.SetLastPInvokeError(Marshal.GetLastSystemError());
+    return __retVal;
+
+    [DllImport("USER32.dll", ExactSpelling = true, EntryPoint = "SetWindowPos"), DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    static extern BOOL LocalExternFunction(HWND hWnd, [Optional] HWND hWndInsertAfter, int X, int Y, int cx, int cy, SET_WINDOW_POS_FLAGS uFlags);
+}
+```
+
+This is CsWin32's own hand-rolled substitute for the built-in automatic
+`SetLastError` capture that `DisableRuntimeMarshallingAttribute` disables for
+classic interop (§1.2) — it zeroes the low-level system error immediately
+before the call via `Marshal.SetLastSystemError(0)`, then immediately after
+the call stores `Marshal.GetLastSystemError()`'s fresh reading via
+`Marshal.SetLastPInvokeError(int)`. Per `Marshal.GetLastPInvokeError()`'s own
+documented contract ("corresponds to the error set either by the most recent
+platform invoke that was configured with `SetLastError` ... or by a call to
+`SetLastPInvokeError(Int32)`, whichever happened last"; "functionally
+equivalent to `GetLastWin32Error` ... should be preferred"), the correct way
+to read the error after any of these calls fails is:
+
+```csharp
+bool succeeded = PInvoke.SetWindowPos(hwnd, default, x, y, cx, cy, flags);
+if (!succeeded)
+{
+    int errorCode = Marshal.GetLastPInvokeError(); // NOT GetLastWin32Error, NOT a hand-rolled GetLastError P/Invoke
+}
+```
+
+`IsWindowArranged` and `IsIconic`/`IsZoomed` carry no such bridge in the
+generated output (a bare `[DllImport]` extern with no wrapper) — consistent,
+since neither documents an extended-error contract. `SendMessageTimeout`'s raw
+extern *does* carry the bridge, but its own documented contract
+("the function does not always call SetLastError on failure... If the
+function returns 0, and GetLastError returns ERROR_SUCCESS, then treat it as a
+generic failure") means a caller that only needs "did it hang" should still
+prefer a bare zero-return check over inspecting the bridged error at all — see
+`PlacementSystemAdapter.ProbeIsHung`'s own remarks. This resolves §7 item 4
+below; that item is removed from the uncertain list accordingly. `ShowWindow`
+itself was not directly exercised this session (the Placement Executor never
+calls it — `SetWindowPlacement`'s own `showCmd` covers the equivalent need),
+but the identical generation mechanism applies to it and every other
+`SetLastError=true`-tagged API in this codebase; verify per-API on the actual
+generated partial before assuming either direction, per this repo's standing
+convention, rather than assuming this note covers a specific API it wasn't
+run against.
 
 ---
 
@@ -493,8 +544,11 @@ canary-test candidate (`testing.md` Tier 5) before it's load-bearing:
    Convention-supported (§5), not stated as a hard requirement on the
    interface's own doc page — verify empirically on an STA thread before
    shipping.
-4. **`SetLastError` nuances under `DisableRuntimeMarshalling` + CsWin32
-   wrappers** (§6) — spot-check the generated code before relying on it.
+
+~~4. `SetLastError` nuances under `DisableRuntimeMarshalling` + CsWin32
+wrappers~~ — resolved by GitHub issue #5; see §6, which now states the
+confirmed mechanism (`Marshal.GetLastPInvokeError()`, not `GetLastWin32Error`
+or `[LibraryImport(SetLastError = true)]`) rather than leaving it uncertain.
 
 ---
 

@@ -61,3 +61,21 @@ WINDOW_EX_STYLE
 // generates every member of a requested enum type, not just the ones referenced so far.
 IsIconic
 IsZoomed
+
+// Placement Executor (DESIGN.md §3.6, issue #5): hang probe, state normalization, invisible-border
+// correction, Defer batch apply, verify-after-move.
+SendMessageTimeoutW
+WM_NULL
+SEND_MESSAGE_TIMEOUT_FLAGS
+SetWindowPlacement
+WINDOWPLACEMENT
+WINDOWPLACEMENT_FLAGS
+SHOW_WINDOW_CMD
+IsWindowArranged
+BeginDeferWindowPos
+DeferWindowPos
+EndDeferWindowPos
+SET_WINDOW_POS_FLAGS
+SystemParametersInfoW
+SYSTEM_PARAMETERS_INFO_ACTION
+WIN32_ERROR
