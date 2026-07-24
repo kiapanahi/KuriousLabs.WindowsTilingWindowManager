@@ -26,6 +26,17 @@
 
     <!-- NuGetAudit runs in "all" mode (incl. transitive) by default on this SDK; the four IDs
          above promote known-vulnerable-package advisories from warnings to build failures. -->
+
+    <!--
+      GitHub issue #8 is the first System.Text.Json consumer in this repo (the HWND journal file).
+      docs/engineering/json-ipc-config.md §1: explicitly disable the reflection fallback rather than
+      relying on PublishAot/PublishTrimmed to do it implicitly — with it unset, a stray CoreCLR-only
+      debug run (dotnet run/dotnet test, neither of which trims) would silently fall back to
+      reflection-based JsonSerializer and mask a source-gen bug until the AOT publish step actually
+      catches it. Repo-wide here, not per-project, since bastiond/bastionc/bastion-bar (DESIGN.md
+      §10) all publish AOT and none of them should ever get a working reflection fallback to lean on.
+    -->
+    <JsonSerializerIsReflectionEnabledByDefault>false</JsonSerializerIsReflectionEnabledByDefault>
   </PropertyGroup>
 
 </Project>

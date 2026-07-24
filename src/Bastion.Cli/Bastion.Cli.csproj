@@ -2,20 +2,30 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net10.0</TargetFramework>
+
+    <!--
+      GitHub issue #8 revisits the "cross-platform, Win32-free" framing this project originally
+      shipped with (see git history for the prior net10.0 comment here). DESIGN.md §3.9's "bastionc
+      is a thin client" / "the schema is language-agnostic so third-party bars/scripts integrate"
+      describes the *IPC command schema* (so a non-.NET script can talk to bastiond over the named
+      pipe), not a promise that bastionc itself never touches Win32 — and DESIGN.md §3.7 requires
+      `bastion restore-windows` to force-restore windows "even with the daemon dead," which is only
+      possible if whatever process runs that command can call SetWindowPlacement directly. Bastion
+      ships on Windows only regardless of TFM naming (DESIGN.md has no other supported OS anywhere
+      in scope), so there is no real cross-platform story this TFM choice was ever protecting —
+      matching Bastion.Win32/Bastion.Daemon's TFM (GitHub issue #6's GetSystemMetricsForDpi/
+      GetDpiForSystem rationale) is the honest choice for a project that now references Bastion.Win32.
+    -->
+    <TargetFramework>net10.0-windows10.0.17763.0</TargetFramework>
     <RootNamespace>Bastion.Cli</RootNamespace>
     <AssemblyName>bastionc</AssemblyName>
 
-    <!--
-      Thin IPC client only — named pipes are cross-platform BCL (System.IO.Pipes), and this
-      project touches no Win32-specific API, so it deliberately targets plain net10.0 rather than
-      net10.0-windows (contrast Bastion.Win32/Bastion.Daemon). DESIGN.md §3.9, §10.
-    -->
     <PublishAot>true</PublishAot>
     <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\Bastion.Win32\Bastion.Win32.csproj" />
     <PackageReference Include="System.CommandLine" />
   </ItemGroup>
 

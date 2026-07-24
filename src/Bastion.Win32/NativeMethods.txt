@@ -103,3 +103,10 @@ UnregisterHotKey
 HOT_KEY_MODIFIERS
 VIRTUAL_KEY
 WM_HOTKEY
+
+// Write-ahead HWND journal (DESIGN.md §3.7, §3.10, issue #8): GetWindowPlacement captures a
+// window's pre-management WINDOWPLACEMENT before it is hidden/moved away, so a force-restore
+// (bastionc restore-windows, or clean daemon shutdown) can put it back afterward.
+// SetWindowPlacement/WINDOWPLACEMENT/WINDOWPLACEMENT_FLAGS/SHOW_WINDOW_CMD are already generated
+// above for the Placement Executor (issue #5) and reused here, not re-requested.
+GetWindowPlacement
