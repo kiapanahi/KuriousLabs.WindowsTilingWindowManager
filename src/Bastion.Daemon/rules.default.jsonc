@@ -1,0 +1,47 @@
+// Bastion's shipped, curated community rules seed (GitHub issue #9; DESIGN.md §9's "Curated rules
+// seed" paragraph).
+//
+// This is a MINIMAL proof-of-mechanism seed, not the real curated database DESIGN.md §9
+// describes. Growing the actual list of well-known games/PiP-players/popups/installers is
+// separate, ongoing, unscheduled follow-up work (file issues as needed: type:chore, area:daemon,
+// no milestone) -- designing that content is explicitly out of scope for this issue.
+//
+// Ships next to bastiond.exe and is layered UNDER the user's own
+// %USERPROFILE%\.config\bastion\rules.jsonc overlay -- see WindowRulesConfigLoader/
+// WindowRulesDocument.Merge. A user rule with the same "name" as one below replaces it wholesale.
+{
+  "rules": [
+    {
+      "name": "example-fullscreen-game",
+      "match": {
+        "executablePath": "C:\\Games\\ExampleGame\\ExampleGame.exe"
+      },
+      "action": "Ignore",
+      "notes": "Example fullscreen game -- ignored so Bastion never tiles or interferes with exclusive-fullscreen rendering (DESIGN.md §9: 'games (ignore)')."
+    },
+    {
+      "name": "example-media-player-pip",
+      "match": {
+        "className": "ExampleMediaPlayerPipClass"
+      },
+      "action": "Floating",
+      "notes": "Example picture-in-picture mini-player -- floated so it stays a small, always-on-top-respecting overlay instead of being tiled into the grid (DESIGN.md §9: 'PiP players (float, always-on-top respected)')."
+    },
+    {
+      "name": "example-collab-app-notification-popup",
+      "match": {
+        "appUserModelId": "Example.CollabApp.Notifications"
+      },
+      "action": "Ignore",
+      "notes": "Example Teams/OneDrive-style notification popup -- ignored so transient toast-like windows never occupy a tile (DESIGN.md §9: 'Teams/OneDrive/notification popups (ignore)')."
+    },
+    {
+      "name": "example-installer-wizard",
+      "match": {
+        "className": "ExampleInstallerWizardClass"
+      },
+      "action": "Floating",
+      "notes": "Example installer/setup-wizard window -- floated since installers are typically fixed-size, short-lived, and awkward to tile (DESIGN.md §9: 'installers and setup wizards (float)')."
+    }
+  ]
+}

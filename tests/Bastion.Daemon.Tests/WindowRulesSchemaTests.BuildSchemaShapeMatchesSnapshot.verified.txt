@@ -1,0 +1,57 @@
+﻿{
+  type: object,
+  properties: {
+    rules: {
+      type: array,
+      items: {
+        type: object,
+        properties: {
+          name: {
+            type: string
+          },
+          match: {
+            type: object,
+            properties: {
+              appUserModelId: {
+                type: [
+                  string,
+                  null
+                ]
+              },
+              executablePath: {
+                type: [
+                  string,
+                  null
+                ]
+              },
+              className: {
+                type: [
+                  string,
+                  null
+                ]
+              }
+            }
+          },
+          action: {
+            enum: [
+              Manage,
+              Floating,
+              Ignore
+            ]
+          },
+          notes: {
+            type: [
+              string,
+              null
+            ]
+          }
+        },
+        required: [
+          name,
+          match,
+          action
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,64 @@
+using System.Text.Json.Nodes;
+using Xunit;
+using static VerifyXunit.Verifier;
+
+namespace Bastion.Daemon.Tests;
+
+/// <summary>
+/// GitHub issue #9's schema-export sanity check: <see cref="WindowRulesSchemaWriter.BuildSchema"/>'s
+/// shape is Verify-snapshotted (docs/engineering/testing.md §6, json-ipc-config.md §3's "snapshot
+/// it with Verify... regenerate as part of the build/release step") so an unintentional change to
+/// <c>WindowRuleAction</c>/<c>WindowRuleMatch</c>/<c>WindowRule</c>/<c>WindowRulesDocument</c>'s
+/// public shape surfaces as a reviewable diff rather than shipping silently.
+/// </summary>
+public sealed class WindowRulesSchemaTests
+{
+    [Fact]
+    public Task BuildSchemaShapeMatchesSnapshot()
+    {
+        // VerifyJson(string), not Verify(JsonNode): the generic object-serializing Verify(...)
+        // reflects over JsonNode as a plain .NET object (producing an empty "{}" for every JsonValue
+        // leaf -- confirmed empirically), rather than treating it as already-serialized JSON text.
+        JsonNode schema = WindowRulesSchemaWriter.BuildSchema();
+        return VerifyJson(schema.ToJsonString());
+    }
+
+    [Fact]
+    public async Task WriteAsyncWritesAParsableSchemaFileToTheGivenPath()
+    {
+        string tempDirectory = Directory.CreateTempSubdirectory("bastion-schema-tests-").FullName;
+        try
+        {
+            string schemaPath = Path.Combine(tempDirectory, "rules.schema.json");
+
+            await WindowRulesSchemaWriter.WriteAsync(schemaPath, TestContext.Current.CancellationToken);
+
+            Assert.True(File.Exists(schemaPath));
+            string content = await File.ReadAllTextAsync(schemaPath, TestContext.Current.CancellationToken);
+            var parsed = JsonNode.Parse(content);
+            Assert.NotNull(parsed);
+        }
+        finally
+        {
+            Directory.Delete(tempDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task WriteAsyncCreatesTheDestinationDirectoryIfMissing()
+    {
+        string tempDirectory = Directory.CreateTempSubdirectory("bastion-schema-tests-").FullName;
+        try
+        {
+            string nestedSchemaPath = Path.Combine(tempDirectory, "nested", "does-not-exist-yet", "rules.schema.json");
+
+            await WindowRulesSchemaWriter.WriteAsync(nestedSchemaPath, TestContext.Current.CancellationToken);
+
+            Assert.True(File.Exists(nestedSchemaPath));
+        }
+        finally
+        {
+            Directory.Delete(tempDirectory, recursive: true);
+        }
+    }
+}

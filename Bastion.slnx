@@ -39,6 +39,9 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Bastion.Core.Tests/Bastion.Core.Tests.csproj" />
+    <Project Path="tests/Bastion.Daemon.Tests/Bastion.Daemon.Tests.csproj">
+      <Platform Project="x64" />
+    </Project>
     <Project Path="tests/Bastion.Layout.Tests/Bastion.Layout.Tests.csproj" />
     <Project Path="tests/Bastion.TestWindows.Tests/Bastion.TestWindows.Tests.csproj" />
     <Project Path="tests/Bastion.Win32.Tests/Bastion.Win32.Tests.csproj">
