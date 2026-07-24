@@ -37,6 +37,13 @@
       §10) all publish AOT and none of them should ever get a working reflection fallback to lean on.
     -->
     <JsonSerializerIsReflectionEnabledByDefault>false</JsonSerializerIsReflectionEnabledByDefault>
+
+    <!--
+      MinVer tag prefix (GitHub issue #48) — repo-wide so every shipping project derives the same
+      version from the same tag. Harmless on projects that don't reference the MinVer package
+      (Bastion.Core/Bastion.Layout): the property is simply unused there.
+    -->
+    <MinVerTagPrefix>v</MinVerTagPrefix>
   </PropertyGroup>
 
 </Project>

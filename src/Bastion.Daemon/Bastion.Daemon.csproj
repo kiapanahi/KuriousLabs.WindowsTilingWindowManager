@@ -23,6 +23,7 @@
     <ProjectReference Include="..\Bastion.Layout\Bastion.Layout.csproj" />
     <ProjectReference Include="..\Bastion.Win32\Bastion.Win32.csproj" />
     <PackageReference Include="Microsoft.Extensions.Hosting" />
+    <PackageReference Include="MinVer" PrivateAssets="all" />
   </ItemGroup>
 
   <!--

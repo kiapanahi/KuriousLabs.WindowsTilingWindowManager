@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using System.CommandLine;
 using System.Text.Json;
+using Bastion.Cli;
 using Bastion.Win32;
 
 // TODO(DESIGN.md §3.9): bastionc is meant to be a thin client over a named-pipe JSON IPC command
@@ -12,6 +13,13 @@ using Bastion.Win32;
 // journal and force-restores every entry directly via Bastion.Win32, without any IPC round trip.
 
 RootCommand rootCommand = new("bastionc — thin IPC client for bastiond. See DESIGN.md §3.9.");
+
+// GitHub issue #48: read and print the MinVer-derived version explicitly rather than relying on
+// System.CommandLine's own (undocumented) default resolution for its built-in --version option —
+// that way this doesn't silently change if a future System.CommandLine version alters what its
+// default reads.
+VersionOption versionOption = rootCommand.Options.OfType<VersionOption>().Single();
+versionOption.Action = new PrintAssemblyVersionAction();
 
 Command statusCommand = new("status", "Query the daemon's current window/monitor topology.");
 statusCommand.SetAction(_ => NotYetImplemented("status"));

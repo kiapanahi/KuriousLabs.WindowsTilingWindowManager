@@ -69,6 +69,7 @@
       Microsoft.Extensions.Hosting meta-package.
     -->
     <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" />
+    <PackageReference Include="MinVer" PrivateAssets="all" />
   </ItemGroup>
 
   <!--

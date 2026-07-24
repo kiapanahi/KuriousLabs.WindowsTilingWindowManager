@@ -410,6 +410,48 @@ publish.
 
 ---
 
+## 9. Product versioning (MinVer)
+
+GitHub issue #48. Bastion derives one semantic version for the whole product from git tags via
+[MinVer](https://github.com/adamralph/minver), referenced as a bare `<PackageReference
+Include="MinVer" PrivateAssets="all" />` (version pinned centrally in `Directory.Packages.props`,
+per §1) in each of the four shipping projects — `Bastion.Daemon`, `Bastion.Cli`, `Bastion.Win32`,
+`Bastion.TestWindows` — and, once scaffolded (issue #19), `Bastion.Bar`. It is **not** a
+`GlobalPackageReference`: `Bastion.Core`/`Bastion.Layout` ship nothing and stay tooling-free per
+their purity rules (`pure-core` skill).
+
+- **Why MinVer over Nerdbank.GitVersioning**: `bastiond`/`bastionc`/`bastion-bar` are three
+  processes of one product that must always deploy as matching versions — the IPC
+  `ProtocolVersion` handshake (`docs/engineering/json-ipc-config.md`) exists specifically to catch
+  the drift a mismatched build would cause. A single repo-wide version derived from git tag +
+  commit height is the right model here, not NBGV's per-project `version.json` (built for
+  independently-versioned packages/libraries, which this repo doesn't publish). MinVer is also a
+  build-time-only MSBuild task: it sets `Version`/`AssemblyVersion`/`FileVersion`/
+  `InformationalVersion` and adds no reference to the built output, so it never appears in a
+  published/trimmed NativeAOT binary.
+- **Tag prefix**: `MinVerTagPrefix` is set to `v` in `Directory.Build.props` (repo-wide; harmless
+  on projects that don't reference the MinVer package). Tags look like `v0.1.0`,
+  `v0.2.0-alpha.1`.
+- **Cutting a release**: `git tag -a vX.Y.Z -m "..."` at the commit to release, then `git push
+  origin vX.Y.Z`. The next build/publish at (or after) that commit picks it up automatically — no
+  MSBuild property to edit by hand.
+- **Where the version surfaces**: `bastionc --version` (explicitly reads
+  `AssemblyInformationalVersionAttribute` rather than relying on `System.CommandLine`'s own
+  undocumented default resolution for its built-in `--version` option — see
+  `src/Bastion.Cli/PrintAssemblyVersionAction.cs`) and a `bastiond` startup log line
+  (`BastiondService.LogStarted`, `[LoggerMessage]` source-gen per
+  `docs/engineering/daemon-architecture.md`).
+- **CI history depth**: MinVer needs the tag history to compute height, so any CI job that builds
+  a shipping project must check out full history — `actions/checkout@v4` with `fetch-depth: 0` (or
+  at minimum enough depth to reach the most recent tag), not the default shallow `fetch-depth: 1`.
+  A shallow checkout without the tag falls back to MinVer's untagged default
+  (`0.0.0-alpha.0.<height>+<sha>`), which still builds but is not the intended release version.
+- Distinct from, and must not be conflated with, the IPC wire-protocol `ProtocolVersion` field
+  described in `docs/engineering/json-ipc-config.md` — that versions the command/reply DTO
+  contract, this versions the product/release.
+
+---
+
 ## Forbidden (build-enforced anti-patterns)
 
 These are build errors (via `BannedApiAnalyzers`/`RS0030`, §5) or must-not-compile-clean patterns,
